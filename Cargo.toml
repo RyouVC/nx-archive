@@ -1,0 +1,17 @@
+[package]
+name = "nsz-rs"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+zstd = { version = "0.13", features = ["experimental"] }
+rayon = "1.8"
+clap = { version = "4.4", features = ["derive"] }
+thiserror = "1.0"
+indicatif = "0.17"
+anyhow = "1.0"
+byteorder = "1.5"
+sha2 = "0.10"
+log = "0.4"
+env_logger = "0.10"
+colored = "2.0"

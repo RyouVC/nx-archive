@@ -1,0 +1,9 @@
+target/
+
+*.nsp
+*.nsz
+*.xci
+*.xcz
+*.nca
+*.ncz
+*.nro
