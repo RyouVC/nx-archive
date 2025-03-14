@@ -376,15 +376,6 @@ impl NszBuilder {
             let level = self.compression_level;
 
             // Create options with consistent parameters
-            let mut opts = zstd::compression::CompressionOptions::new()
-                .level(level)
-                .window_log(31);
-
-            if let Ok(dict) = zstd::compression::CompressionDict::for_compression(
-                &vec![0; 512], // Minimal dictionary, we'll tune parameters instead
-            ) {
-                opts = opts.using_dictionary(&dict);
-            }
 
             // Try to compress the block with these parameters
             let compressed = match zstd::stream::encode_all(block, level) {
