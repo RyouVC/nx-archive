@@ -1,9 +1,8 @@
-target/
-
-*.nsp
+/target
 *.nsz
-*.xci
-*.xcz
-*.nca
-*.ncz
+/dump
+*.nsp
 *.nro
+*.nacp
+*.xci
+*.nca

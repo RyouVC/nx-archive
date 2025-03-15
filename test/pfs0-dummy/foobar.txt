@@ -1,0 +1,3 @@
+Hi Mom!
+
+This is a test file, and the fixture file should be initially created with nstool (https://github.com/jakcron/nstool).

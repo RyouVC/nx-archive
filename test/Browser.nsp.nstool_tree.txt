@@ -1,0 +1,6 @@
+[PartitionFs/Tree]
+ Root:/
+  75e6019529c6f42ad7ebb337a59491a3.nca
+  cf03cf6a80796869775f77e0c61e136e.cnmt.nca
+  2b9b99ea58139c320c82055c337135df.nca
+  2d6ab4c7c3a362815e9e95b2f4143a1e.nca
