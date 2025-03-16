@@ -1,6 +1,6 @@
 use aes::Aes128;
-use aes::cipher::KeyInit;
-use aes::cipher::generic_array::GenericArray;
+use cipher::{generic_array, BlockCipher, BlockDecrypt, BlockEncrypt, KeyInit};
+use generic_array::GenericArray;
 use hex::FromHex;
 use std::fmt;
 use std::fs::File;
@@ -29,7 +29,7 @@ impl fmt::Debug for Keyset {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         struct HexBytes<'a>(&'a [u8]);
 
-        impl<'a> fmt::Debug for HexBytes<'a> {
+        impl fmt::Debug for HexBytes<'_> {
             fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
                 write!(f, "{:.X?}", self.0)
             }
@@ -72,11 +72,10 @@ impl Keyset {
         Self::from_reader(file)
     }
 
-    
     /// Creates an XTS128 cipher for NCA header encryption/decryption
-    /// 
+    ///
     /// The header key is split into two 128-bit keys for XTS, with the first half used for the data unit key and the second half used for the tweak key.
-    /// 
+    ///
     pub fn header_crypt(&self) -> Xts128<Aes128> {
         let cipher_1 = Aes128::new(GenericArray::from_slice(&self.header_key[..0x10]));
         let cipher_2 = Aes128::new(GenericArray::from_slice(&self.header_key[0x10..]));
@@ -165,9 +164,13 @@ impl Keyset {
         self.key_area_keys_system.get(idx)
     }
 
-    /// Get a title key encryption key by index
-    pub fn get_title_kek(&self, idx: usize) -> Option<&[u8; 0x10]> {
-        self.title_key_encryption_keys.get(idx)
+    /// Get the title KEK for the specified key generation
+    pub fn get_title_kek(&self, key_generation: usize) -> Option<&[u8]> {
+        if key_generation < self.title_key_encryption_keys.len() {
+            Some(&self.title_key_encryption_keys[key_generation])
+        } else {
+            None
+        }
     }
 
     /// Check if the keyset has the necessary keys for NCA decryption

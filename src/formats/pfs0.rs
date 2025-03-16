@@ -213,6 +213,11 @@ impl<R: Read + Seek> Pfs0<R> {
         println!("Dumped!");
         Ok(data)
     }
+
+    pub fn list_files(&self) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+        let files = self.files.iter().map(|f| f.name.clone()).collect();
+        Ok(files)
+    }
 }
 
 #[cfg(test)]
@@ -236,7 +241,7 @@ mod tests {
         let data = pfs0.extract_file(vpath).unwrap();
         println!("Data length: {}", data.len());
         // write to file
-        // std::fs::write("output.bin", &data).expect("Failed to write file");
+        std::fs::write("test_tmp/output.nca", &data).expect("Failed to write file");
         assert_eq!(data.len(), fixture_data.len());
         assert_eq!(data, fixture_data);
     }
