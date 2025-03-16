@@ -1,12 +1,8 @@
 use aes::Aes128;
 use cipher::KeyIvInit;
 use cipher::StreamCipher;
-use ctr::Ctr128BE;
 use std::io::{self, Read, Result, Seek, SeekFrom};
 use std::sync::{Arc, Mutex};
-
-/// Constants needed for alignment
-const AES_BLOCK_SIZE: usize = 0x10;
 
 /// Function to align down to 16-byte boundary for AES operations
 pub const fn align_down(value: u64, align: u64) -> u64 {
@@ -173,10 +169,7 @@ impl<R: Read + Seek> Aes128CtrReader<R> {
 impl<R: Read + Seek> Read for Aes128CtrReader<R> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         // Get current position exactly like CNTX does
-        let offset = match self.base_reader.stream_position() {
-            Ok(pos) => pos,
-            Err(e) => return Err(e),
-        };
+        let offset = self.base_reader.stream_position()?;
 
         // Align the offset to 16-byte boundary for AES
         let aligned_offset = align_down(offset, 0x10);
@@ -206,9 +199,11 @@ impl<R: Read + Seek> Read for Aes128CtrReader<R> {
         // use cipher::{NewCipher, StreamCipher};
 
         // Create cipher using KeyIvInit and from_core
-        let key_array: &[u8; 16] = self.key.as_slice().try_into().map_err(|_| {
-            io::Error::new(io::ErrorKind::Other, "Invalid key length")
-        })?;
+        let key_array: &[u8; 16] = self
+            .key
+            .as_slice()
+            .try_into()
+            .map_err(|_| io::Error::new(io::ErrorKind::Other, "Invalid key length"))?;
         let mut ctr = ctr::Ctr128BE::<Aes128>::new(key_array.into(), (&iv).into());
 
         // Apply keystream for decryption in CTR mode
@@ -244,8 +239,8 @@ impl<R: Read + Seek> Seek for Aes128CtrReader<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ctr::Ctr128BE;
     use std::io::{Cursor, Read};
-
     #[test]
     fn test_aes128_ctr_reader() {
         let test_data = b"0123456789ABCDEF0123456789ABCDEF";

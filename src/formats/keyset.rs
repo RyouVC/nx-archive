@@ -1,6 +1,5 @@
 use aes::Aes128;
-use cipher::{generic_array, BlockCipher, BlockDecrypt, BlockEncrypt, KeyInit};
-use generic_array::GenericArray;
+use cipher::{KeyInit, generic_array::GenericArray};
 use hex::FromHex;
 use std::fmt;
 use std::fs::File;
@@ -85,69 +84,61 @@ impl Keyset {
 
     pub fn from_reader(reader: impl Read + Seek) -> Result<Self> {
         let lines = BufReader::new(reader).lines();
-
         let mut keyset = Keyset::default();
 
         for line in lines {
             let line_str = line?;
-            let items: Vec<_> = line_str.split('=').collect();
-            if items.len() != 2 {
-                return Err(Error::new(
-                    ErrorKind::InvalidInput,
-                    "Invalid keyset key-value",
-                ));
+            let line_parts: Vec<_> = line_str.split('=').collect();
+            
+            if line_parts.len() != 2 {
+            continue; // Skip invalid lines instead of failing
             }
 
-            let key = items[0].trim().to_string();
-            let value = items[1].trim().to_string();
+            let key = line_parts[0].trim();
+            let value = line_parts[1].trim();
 
-            let key_data = Vec::from_hex(&value)
-                .map_err(|_| Error::new(ErrorKind::InvalidInput, "Invalid hex key"))?;
+            let key_data = match Vec::from_hex(value) {
+            Ok(data) => data,
+            Err(_) => continue, // Skip invalid hex values
+            };
 
-            match key.as_str() {
-                "header_key" => {
-                    keyset.header_key = key_data
-                        .try_into()
-                        .map_err(|_| Error::new(ErrorKind::InvalidInput, "Invalid key length"))?;
+            // Helper function to insert key into vector
+            let add_key_to_vec = |vec: &mut Vec<[u8; 0x10]>, idx: usize, data: &[u8]| -> Result<()> {
+            if idx >= vec.len() {
+                vec.resize(idx + 1, [0; 0x10]);
+            }
+            vec[idx] = data.try_into()
+                .map_err(|_| Error::new(ErrorKind::InvalidInput, "Invalid key length"))?;
+            Ok(())
+            };
+
+            // Process the key
+            let process_key = |name_prefix: &str, vec: &mut Vec<[u8; 0x10]>| {
+                if let Some(idx) = Self::get_key_name_idx(name_prefix, key) {
+                    let _ = add_key_to_vec(vec, idx, &key_data);
                 }
-                _ => {
-                    if let Some(idx) = Self::get_key_name_idx("key_area_key_application_", &key) {
-                        if idx >= keyset.key_area_keys_application.len() {
-                            keyset.key_area_keys_application.resize(idx + 1, [0; 0x10]);
-                        }
-                        keyset.key_area_keys_application[idx] =
-                            key_data.try_into().map_err(|_| {
-                                Error::new(ErrorKind::InvalidInput, "Invalid key length")
-                            })?;
-                    } else if let Some(idx) = Self::get_key_name_idx("key_area_key_ocean_", &key) {
-                        if idx >= keyset.key_area_keys_ocean.len() {
-                            keyset.key_area_keys_ocean.resize(idx + 1, [0; 0x10]);
-                        }
-                        keyset.key_area_keys_ocean[idx] = key_data.try_into().map_err(|_| {
-                            Error::new(ErrorKind::InvalidInput, "Invalid key length")
-                        })?;
-                    } else if let Some(idx) = Self::get_key_name_idx("key_area_key_system_", &key) {
-                        if idx >= keyset.key_area_keys_system.len() {
-                            keyset.key_area_keys_system.resize(idx + 1, [0; 0x10]);
-                        }
-                        keyset.key_area_keys_system[idx] = key_data.try_into().map_err(|_| {
-                            Error::new(ErrorKind::InvalidInput, "Invalid key length")
-                        })?;
-                    } else if let Some(idx) = Self::get_key_name_idx("titlekek_", &key) {
-                        if idx >= keyset.title_key_encryption_keys.len() {
-                            keyset.title_key_encryption_keys.resize(idx + 1, [0; 0x10]);
-                        }
-                        keyset.title_key_encryption_keys[idx] =
-                            key_data.try_into().map_err(|_| {
-                                Error::new(ErrorKind::InvalidInput, "Invalid key length")
-                            })?;
+            };
+
+            match key {
+                "header_key" => {
+                    if let Ok(header_key) = key_data.try_into() {
+                        keyset.header_key = header_key;
                     }
                 }
+                key if key.starts_with("key_area_key_application_") => 
+                    process_key("key_area_key_application_", &mut keyset.key_area_keys_application),
+                key if key.starts_with("key_area_key_ocean_") => 
+                    process_key("key_area_key_ocean_", &mut keyset.key_area_keys_ocean),
+                key if key.starts_with("key_area_key_system_") => 
+                    process_key("key_area_key_system_", &mut keyset.key_area_keys_system),
+                key if key.starts_with("titlekek_") => 
+                    process_key("titlekek_", &mut keyset.title_key_encryption_keys),
+                _ => {} // Ignore unknown keys
             }
         }
 
         Ok(keyset)
-    }
+        }
 
     /// Get an application key area key by index
     pub fn get_key_area_key_application(&self, idx: usize) -> Option<&[u8; 0x10]> {

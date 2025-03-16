@@ -1,0 +1,647 @@
+This is the metadata file that ends in <code>".cnmt{.nca}"</code> or <code>"meta0.ncd"</code>. This seems to replace the TMD format.
+
+The official name for CNMT is "PackagedContentMeta".
+
+= PackagedContentMetaHeader =
+This is "nn::ncm::PackagedContentMetaHeader".
+
+{| class="wikitable" border="1"
+|-
+! Offset
+! Size
+! Description
+|-
+| 0x0
+| 0x8
+| Id
+|-
+| 0x8
+| 0x4
+| Version
+|-
+| 0xC
+| 0x1
+| [[NCM_services#ContentMetaType|ContentMetaType]]
+|-
+| 0xD
+| 0x1
+| [17.0.0+] [[NCM_services#ContentMetaPlatform|ContentMetaPlatform]] ([1.0.0-16.1.0] Reserved)
+|-
+| 0xE
+| 0x2
+| ExtendedHeaderSize
+|-
+| 0x10
+| 0x2
+| ContentCount
+|-
+| 0x12
+| 0x2
+| ContentMetaCount
+|-
+| 0x14
+| 0x1
+| ContentMetaAttributes (0=None, 1=IncludesExFatDriver, 2=Rebootless, 4=Compacted)
+|-
+| 0x15
+| 0x3
+| Reserved
+|-
+| 0x18
+| 0x4
+| RequiredDownloadSystemVersion
+|-
+| 0x1C
+| 0x4
+| Reserved
+|}
+
+= SystemUpdateMetaExtendedHeader =
+This is "nn::ncm::SystemUpdateMetaExtendedHeader".
+
+{| class="wikitable" border="1"
+|-
+! Offset
+! Size
+! Description
+|-
+| 0x0
+| 0x4
+| ExtendedDataSize
+|}
+
+= ApplicationMetaExtendedHeader =
+This is "nn::ncm::ApplicationMetaExtendedHeader".
+
+{| class="wikitable" border="1"
+|-
+! Offset
+! Size
+! Description
+|-
+| 0x0
+| 0x8
+| PatchId
+|-
+| 0x8
+| 0x4
+| RequiredSystemVersion
+|-
+| 0xC
+| 0x4
+| RequiredApplicationVersion
+|}
+
+= PatchMetaExtendedHeader =
+This is "nn::ncm::PatchMetaExtendedHeader".
+
+{| class="wikitable" border="1"
+|-
+! Offset
+! Size
+! Description
+|-
+| 0x0
+| 0x8
+| ApplicationId
+|-
+| 0x8
+| 0x4
+| RequiredSystemVersion
+|-
+| 0xC
+| 0x4
+| ExtendedDataSize
+|-
+| 0x10
+| 0x8
+| Reserved
+|}
+
+= AddOnContentMetaExtendedHeader =
+This is "nn::ncm::AddOnContentMetaExtendedHeader".
+
+{| class="wikitable" border="1"
+|-
+! Offset
+! Size
+! Description
+|-
+| 0x0
+| 0x8
+| ApplicationId
+|-
+| 0x8
+| 0x4
+| RequiredApplicationVersion
+|-
+| 0xC
+| 0x1
+| [15.0.0+] ContentAccessibilities ([1.0.0-14.1.2] Reserved)
+|-
+| 0xD
+| 0x3
+| Reserved
+|-
+| 0x10
+| 0x8
+| [15.0.0+] DataPatchId
+|}
+
+= DeltaMetaExtendedHeader =
+This is "nn::ncm::DeltaMetaExtendedHeader".
+
+{| class="wikitable" border="1"
+|-
+! Offset
+! Size
+! Description
+|-
+| 0x0
+| 0x8
+| ApplicationId
+|-
+| 0x8
+| 0x4
+| ExtendedDataSize
+|-
+| 0xC
+| 0x4
+| Reserved
+|}
+
+= DataPatchMetaExtendedHeader =
+This is "nn::ncm::DataPatchMetaExtendedHeader".
+
+This was added with [15.0.0+]. 
+
+{| class="wikitable" border="1"
+|-
+! Offset
+! Size
+! Description
+|-
+| 0x0
+| 0x8
+| DataId
+|-
+| 0x8
+| 0x8
+| ApplicationId
+|-
+| 0x10
+| 0x4
+| RequiredApplicationVersion
+|-
+| 0x14
+| 0x4
+| ExtendedDataSize
+|-
+| 0x18
+| 0x8
+| Reserved
+|}
+
+= PackagedContentInfo =
+This is "nn::ncm::PackagedContentInfo".
+
+{| class="wikitable" border="1"
+|-
+! Offset
+! Size
+! Description
+|-
+| 0x0
+| 0x20
+| Hash (SHA256 of the referenced content)
+|-
+| 0x20
+| 0x10
+| ContentId
+|-
+| 0x30
+| [15.0.0+] 0x5 ([1.0.0-14.1.2] 0x6)
+| Size
+|-
+| 0x35
+| 0x1
+| [15.0.0+] ContentAttributes
+|-
+| 0x36
+| 0x1
+| ContentType (0=Meta, 1=Program, 2=Data, 3=Control, 4=[[Internet_Browser|HtmlDocument]], 5=[[Internet_Browser|LegalInformation]], 6=[[NCA_Format|DeltaFragment]])
+|-
+| 0x37
+| 0x1
+| IdOffset
+|}
+
+= ContentMetaInfo =
+This is "nn::ncm::ContentMetaInfo".
+
+{| class="wikitable" border="1"
+|-
+! Offset
+! Size
+! Description
+|-
+| 0x0
+| 0x8
+| Id
+|-
+| 0x8
+| 0x4
+| Version
+|-
+| 0xC
+| 0x1
+| [[NCM_services#ContentMetaType|ContentMetaType]]
+|-
+| 0xD
+| 0x1
+| ContentMetaAttributes (0=None, 1=IncludesExFatDriver, 2=Rebootless, 4=Compacted)
+|-
+| 0xE
+| 0x2
+| Reserved
+|}
+
+This is used for SystemUpdate, see here: [[NCM_services#ReadEntryMetaRecords]].
+
+= SystemUpdateMetaExtendedData =
+This is "nn::ncm::SystemUpdateMetaExtendedData".
+
+If the Version field is 1, the format is:
+{| class="wikitable" border="1"
+|-
+! Offset
+! Size
+! Description
+|-
+| 0x0
+| 0x4
+| Version
+|-
+| 0x4
+| 0x4
+| VariationCount
+|-
+| 0x8
+| 0x20 * VariationCount
+| [[#FirmwareVariationInfo|FirmwareVariationInfo]] (Version 1)
+|}
+
+If the Version field is 2, the format is:
+{| class="wikitable" border="1"
+|-
+! Offset
+! Size
+! Description
+|-
+| 0x0
+| 0x4
+| Version
+|-
+| 0x4
+| 0x4
+| VariationCount
+|-
+| 0x8
+| 0x4 * VariationCount
+| FirmwareVariationId
+|-
+| Variable
+| 0x20 * VariationCount
+| [[#FirmwareVariationInfo|FirmwareVariationInfo]] (Version 2)
+|-
+| Variable
+| 0x10 * MetaCount (from [[#FirmwareVariationInfo|FirmwareVariationInfo]] (Version 2))
+| [[#ContentMetaInfo|ContentMetaInfo]] (if ReferToBase is False)
+|}
+
+== FirmwareVariationInfo ==
+This is "FirmwareVariationInfo ".
+
+If the Version field is 1, the format is:
+{| class="wikitable" border="1"
+|-
+! Offset
+! Size
+! Description
+|-
+| 0x0
+| 0x4
+| FirmwareVariationId
+|-
+| 0x4
+| 0x1C
+| Reserved
+|}
+
+If the Version field is 2, the format is:
+{| class="wikitable" border="1"
+|-
+! Offset
+! Size
+! Description
+|-
+| 0x0
+| 0x1
+| ReferToBase (0=False, 1=True)
+|-
+| 0x1
+| 0x3
+| Reserved
+|-
+| 0x4
+| 0x4
+| MetaCount
+|-
+| 0x8
+| 0x18
+| Reserved
+|}
+
+= PatchMetaExtendedData =
+This is "nn::ncm::PatchMetaExtendedData".
+
+{| class="wikitable" border="1"
+|-
+! Offset
+! Size
+! Description
+|-
+| 0x0
+| 0x4
+| PatchHistoryHeaderCount
+|-
+| 0x4
+| 0x4
+| PatchDeltaHistoryCount
+|-
+| 0x8
+| 0x4
+| PatchDeltaHeaderCount
+|-
+| 0xC
+| 0x4
+| FragmentSetCount
+|-
+| 0x10
+| 0x4
+| PatchHistoryContentInfoCount
+|-
+| 0x14
+| 0x4
+| PatchDeltaPackagedContentInfoCount
+|-
+| 0x18
+| 0x4
+| Reserved
+|-
+| 0x1C
+| 0x38 * PatchHistoryHeaderCount
+| [[#PatchHistoryHeader|PatchHistoryHeader]]
+|-
+| Variable
+| 0x28 * PatchDeltaHistoryCount
+| [[#PatchDeltaHistory|PatchDeltaHistory]]
+|-
+| Variable
+| 0x28 * PatchDeltaHeaderCount
+| [[#PatchDeltaHeader|PatchDeltaHeader]]
+|-
+| Variable
+| 0x34 * FragmentSetCount
+| [[#FragmentSet|FragmentSet]]
+|-
+| Variable
+| 0x18 * PatchHistoryContentInfoCount
+| [[#PackagedContentInfo|PatchHistoryContentInfo]] ([[#PackagedContentInfo|PackagedContentInfo]] without the Hash entry)
+|-
+| Variable
+| 0x38 * PatchDeltaPackagedContentInfoCount
+| [[#PackagedContentInfo|PatchDeltaPackagedContentInfo]]
+|-
+| Variable
+| 0x4 * FragmentIndicatorCount (from [[#FragmentSet|FragmentSet]])
+| [[#FragmentIndicator|FragmentIndicator]]
+|}
+
+== PatchHistoryHeader ==
+This is "nn::ncm::PatchHistoryHeader".
+
+{| class="wikitable" border="1"
+|-
+! Offset
+! Size
+! Description
+|-
+| 0x0
+| 0x10
+| ContentMetaKey
+|-
+| 0x10
+| 0x20
+| Digest
+|-
+| 0x30
+| 0x2
+| ContentInfoCount
+|-
+| 0x32
+| 0x6
+| Reserved
+|}
+
+== PatchDeltaHistory ==
+This is "nn::ncm::PatchDeltaHistory".
+
+{| class="wikitable" border="1"
+|-
+! Offset
+! Size
+! Description
+|-
+| 0x0
+| 0x8
+| SourcePatchId
+|-
+| 0x8
+| 0x8
+| DestinationPatchId
+|-
+| 0x10
+| 0x4
+| SourceVersion
+|-
+| 0x14
+| 0x4
+| DestinationVersion
+|-
+| 0x18
+| 0x8
+| DownloadSize
+|-
+| 0x20
+| 0x8
+| Reserved
+|}
+
+== PatchDeltaHeader ==
+This is "nn::ncm::PatchDeltaHeader".
+
+{| class="wikitable" border="1"
+|-
+! Offset
+! Size
+! Description
+|-
+| 0x0
+| 0x8
+| SourcePatchId
+|-
+| 0x8
+| 8
+| DestinationPatchId
+|-
+| 0x10
+| 0x4
+| SourceVersion
+|-
+| 0x14
+| 0x4
+| DestinationVersion
+|-
+| 0x18
+| 0x2
+| FragmentSetCount
+|-
+| 0x1A
+| 0x6
+| Reserved
+|-
+| 0x20
+| 0x2
+| ContentInfoCount
+|-
+| 0x22
+| 0x6
+| Reserved
+|}
+
+== FragmentSet ==
+This is "nn::ncm::FragmentSet".
+
+{| class="wikitable" border="1"
+|-
+! Offset
+! Size
+! Description
+|-
+| 0x0
+| 0x10
+| SourceContentId
+|-
+| 0x10
+| 0x10
+| DestinationContentId
+|-
+| 0x20
+| 0x6
+| SourceSize
+|-
+| 0x26
+| 0x6
+| DestinationSize
+|-
+| 0x2C
+| 0x2
+| FragmentIndicatorCount
+|-
+| 0x2E
+| 0x1
+| FragmentTargetContentType (0=Meta, 1=Program, 2=Data, 3=Control, 4=[[Internet_Browser|HtmlDocument]], 5=[[Internet_Browser|LegalInformation]], 6=[[NCA_Format|DeltaFragment]])
+|-
+| 0x2F
+| 0x1
+| UpdateType (0=ApplyAsDelta, 1=Overwrite, 2=Create)
+|-
+| 0x30
+| 0x4
+| Reserved
+|}
+
+== FragmentIndicator ==
+This is "nn::ncm::FragmentIndicator".
+
+{| class="wikitable" border="1"
+|-
+! Offset
+! Size
+! Description
+|-
+| 0x0
+| 0x2
+| ContentInfoIndex
+|-
+| 0x2
+| 0x2
+| FragmentIndex
+|}
+
+= DeltaMetaExtendedData =
+This is "nn::ncm::DeltaMetaExtendedData".
+
+{| class="wikitable" border="1"
+|-
+! Offset
+! Size
+! Description
+|-
+| 0x0
+| 0x8
+| SourcePatchId
+|-
+| 0x8
+| 0x8
+| DestinationPatchId
+|-
+| 0x10
+| 0x4
+| SourceVersion
+|-
+| 0x14
+| 0x4
+| DestinationVersion
+|-
+| 0x18
+| 0x2
+| FragmentSetCount
+|-
+| 0x1A
+| 0x6
+| Reserved
+|-
+| 0x20
+| 0x34 * FragmentSetCount
+| [[#FragmentSet|FragmentSet]]
+|-
+| Variable
+| 0x4 * FragmentIndicatorCount (from [[#FragmentSet|FragmentSet]])
+| [[#FragmentIndicator|FragmentIndicator]]
+|}
+
+= Digest =
+{| class="wikitable" border="1"
+|-
+! Offset
+! Size
+! Description
+|-
+| 0x0
+| 0x20
+| Digest
+|}
+
+This is a SHA-256 hash always found at the end of the file. The hash is calculated over the CNMT file's contents, but this is only done for the development version of the file which results in its production version counterpart sharing the same hash value.
