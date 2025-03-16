@@ -15,8 +15,10 @@ aes = "0.8.4"
 binrw = ">=0.14"
 ctr = "0.9.2"
 hex = "0.4.3"
+hex-literal = "1.0.0"
 regex = "1.11.1"
 tracing = "0"
+xts = "0.0.0"
 xts-mode = "0.5.1"
 
 [dev-dependencies]

@@ -16,7 +16,7 @@
 //! 
 //! Example format:
 //! 
-//! ```
+//! ```plaintext
 //! key_name = key_value
 //! ```
 

@@ -6,3 +6,5 @@
 *.nacp
 *.xci
 *.nca
+*.keys
+/test_tmp

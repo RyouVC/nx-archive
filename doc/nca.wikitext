@@ -1,0 +1,698 @@
+NCA means «Nintendo Content Archive».
+
+The entire raw NCAs are encrypted.
+
+The only known area which is not encrypted in the raw NCA is the logo section, when the NCA includes that section. Everything else documented on this page is for the plaintext version of that data.
+
+= Encryption =
+The first 0xC00 bytes are encrypted with AES-XTS with sector size 0x200 with a non-standard "tweak" (endianness is reversed, see [https://gist.github.com/SciresM/fe8a631d13c069bd66e9c656ab5b3f7f here]), this encrypted data is an 0x400 NCA header + an 0x200 header for each section in the section table.
+
+For pre-1.0.0 "NCA2" NCAs, the first 0x400 byte are encrypted the same way as in NCA3. However, each section header is individually encrypted as though it were sector 0, instead of the appropriate sector as in NCA3.
+
+= Header =
+{| class="wikitable" border="1"
+|-
+! Offset
+! Size
+! Description
+|-
+| 0x0
+| 0x100
+| RSA-2048 signature over the header (data from 0x200 to 0x400) using a fixed key
+|-
+| 0x100
+| 0x100
+| RSA-2048 signature over the header (data from 0x200 to 0x400) using a key from [[NPDM]] (or zeroes if not a program)
+|-
+| 0x200
+| 0x4
+| Magic "NCA3" ("NCA2", "NCA1" or "NCA0" for pre-1.0.0 NCAs)
+|-
+| 0x204
+| 0x1
+| DistributionType (0x00 = Download, 0x01 = GameCard)
+|-
+| 0x205
+| 0x1
+| ContentType (0x00 = Program, 0x01 = Meta, 0x02 = Control, 0x03 = Manual, 0x04 = Data, 0x05 = PublicData)
+|-
+| 0x206
+| 0x1
+| KeyGenerationOld (0x00 = [[1.0.0]], 0x01 = Unused, 0x02 = [[3.0.0]])
+|-
+| 0x207
+| 0x1
+| KeyAreaEncryptionKeyIndex (0x00 = Application, 0x01 = Ocean, 0x02 = System)
+|-
+| 0x208
+| 0x8
+| ContentSize
+|-
+| 0x210
+| 0x8
+| ProgramId
+|-
+| 0x218
+| 0x4
+| ContentIndex
+|-
+| 0x21C
+| 0x4
+| SdkAddonVersion (used in "FS_ACCESS: { sdk_version: {byte3}.{byte2}.{byte1}, ..." with byte0 set to 0 and compared with a required minimum value: 0x000B0000)
+|-
+| 0x220
+| 0x1
+| KeyGeneration (0x03 = [[3.0.1]], 0x04 = [[4.0.0]], 0x05 = [[5.0.0]], 0x06 = [[6.0.0]], 0x07 = [[6.2.0]], 0x08 = [[7.0.0]], 0x09 = [[8.1.0]], 0x0A = [[9.0.0]], 0x0B = [[9.1.0]], 0x0C = [[12.1.0]], 0x0D = [[13.0.0]], 0x0E = [[14.0.0]], 0x0F = [[15.0.0]], 0x10 = [[16.0.0]], 0x11 = [[17.0.0]], 0x12 = [[18.0.0]], 0x13 = [[19.0.0]], 0xFF = Invalid)
+|-
+| 0x221
+| 0x1
+| [9.0.0+] SignatureKeyGeneration
+|-
+| 0x222
+| 0xE
+| Reserved
+|-
+| 0x230
+| 0x10
+| RightsId
+|-
+| 0x240
+| 0x10 * 4
+| Array of [[#FsEntry|FsEntry]]
+|-
+| 0x280
+| 0x20 * 4
+| Array of SHA256 hashes (over each [[#FsHeader|FsHeader]])
+|-
+| 0x300
+| 0x10 * 4
+| EncryptedKeyArea
+|}
+
+When the above '''KeyGenerationOld''' field is 0x2 on >= v3.0, different {crypto/keydata} is used for the sections' data. With system content, this is used with every ncatype except ncatype0. The only other exception is {data-content} for the firm titles: this is required in order for older-system-versions to install it.
+
+'''KeyGeneration''' 0x3 (with '''KeyGenerationOld''' set to 0x2) is used for all [[3.0.1]] sysmodules and the [[System_Version_Title]]. With [[3.0.2]], all updated titles use the crypto from [[3.0.1]] for non-ncatype0, except for firm {data-content}. In some cases various game content uses the above newer crypto as well.
+
+'''KeyGeneration''' is always '''MasterKeyVersion''' + 1, except for generations 0 and 1 which are both version 0.
+
+The keyindex passed to <key-generation-related code> is determined as follows:
+* Pre-[[3.0.0]]: The '''KeyAreaEncryptionKeyIndex''' field (0x207) is passed directly.
+* [[3.0.0]]+: It's determined using the '''KeyAreaEncryptionKeyIndex''' field (0x207) and the '''KeyGenerationOld''' field (0x206). The latter field must be 0, 1 or 2. In each ncahdr_keyindex block, it executes "if(ncahdr_x206>=3)<panic>", but that won't trigger due to the earlier check. The end result is basically the same as pre-[[3.0.0]], except when ncahdr_x206 == 0x2, final_index is new_base_index+ncahdr_keyindex. Actual implementation loads index from u32_array[ncahdr_crypto_type], where the address of u32_array is different for each ncahdr_keyindex.
+* [[3.0.1]]+: The dedicated range check for the '''KeyGenerationOld''' field (0x206) was removed, since the updated code no longer needs it. The output from a function masked with 0xFF is now used instead of ncahdr_x206. The range check for that field was changed from {ncahdr_x206 check with panic described above}, to "if(index>=4)final_index=10;"(skips accessing the array and uses 10 directly). The arrays were updated with an additional entry: final_index=v301_base_index+ncahdr_keyindex.
+** The keydata for the above index10 is not(?) known to be initialized.
+** The new function called by the code described above does:
+** <code>if(ncahdr_x206 < ncahdr_x220){ret = ncahdr_x220; } else { ret = ncahdr_x206; } return ret;</code>
+
+== FsEntry ==
+{| class="wikitable" border="1"
+|-
+! Offset
+! Size
+! Description
+|-
+| 0x0
+| 0x4
+| StartOffset (in blocks which are 0x200 bytes) 
+|-
+| 0x4
+| 0x4
+| EndOffset (in blocks which are 0x200 bytes) 
+|-
+| 0x8
+| 0x8
+| Reserved
+|}
+
+= FsHeader =
+{| class="wikitable" border="1"
+|-
+! Offset
+! Size
+! Description
+|-
+| 0x0
+| 0x2
+| Version (always 2)
+|-
+| 0x2
+| 0x1
+| FsType (0 = RomFS, 1 = PartitionFS)
+|-
+| 0x3
+| 0x1
+| HashType (0 = Auto, 1 = None, 2 = HierarchicalSha256Hash, 3 = HierarchicalIntegrityHash, [14.0.0+] 4 = AutoSha3, [14.0.0+] 5 = HierarchicalSha3256Hash, [14.0.0+] 6 = HierarchicalIntegritySha3Hash)
+|-
+| 0x4
+| 0x1
+| EncryptionType (0 = Auto, 1 = None, 2 = AesXts, 3 = AesCtr, 4 = AesCtrEx, [14.0.0+] 5 = AesCtrSkipLayerHash, [14.0.0+] 6 = AesCtrExSkipLayerHash)
+|-
+| 0x5
+| 0x1
+| [14.0.0+] MetaDataHashType (0 = None, 1 = HierarchicalIntegrity)
+|-
+| 0x6
+| 0x2
+| Reserved
+|-
+| 0x8
+| 0xF8
+| [[#HashData|HashData]]
+|-
+| 0x100
+| 0x40
+| [[#PatchInfo|PatchInfo]] (only used with game updates RomFs)
+|-
+| 0x140
+| 0x4
+| Generation
+|-
+| 0x144
+| 0x4
+| SecureValue
+|-
+| 0x148
+| 0x30
+| [[#SparseInfo|SparseInfo]] (only used in sections with sparse storage)
+|-
+| 0x178
+| 0x28
+| [12.0.0+] [[#CompressionInfo|CompressionInfo]]
+|-
+| 0x1A0
+| 0x30
+| [14.0.0+] [[#MetaDataHashDataInfo|MetaDataHashDataInfo]]
+|-
+| 0x1D0
+| 0x30
+| Reserved
+|}
+
+The FsHeader for each section is at absoluteoffset+0x400+(sectionid*0x200), where sectionid corresponds to the index used with the entry/hash tables.
+
+== HashData ==
+This contains information specific to the hash type in use.
+
+=== HierarchicalSha256Data ===
+{| class="wikitable" border="1"
+|-
+! Offset
+! Size
+! Description
+|-
+| 0x0
+| 0x20
+| MasterHash (SHA256 hash over the hash-table at section-start+0 with the below hash-table size)
+|-
+| 0x20
+| 0x4
+| BlockSize
+|-
+| 0x24
+| 0x4
+| LayerCount (always 2)
+|-
+| 0x28
+| 0x50
+| [[#Region|LayerRegions]] (one region for the hash-table and another for PFS0 filesystem)
+|-
+| 0x78
+| 0x80
+| Reserved
+|}
+
+==== Region ====
+{| class="wikitable" border="1"
+|-
+! Offset
+! Size
+! Description
+|-
+| 0x0
+| 0x8
+| Offset
+|-
+| 0x8
+| 0x8
+| Size
+|}
+
+=== IntegrityMetaInfo ===
+{| class="wikitable" border="1"
+|-
+! Offset
+! Size
+! Description
+|-
+| 0x0
+| 0x4
+| Magic ("IVFC")
+|-
+| 0x4
+| 0x4
+| Version
+|-
+| 0x8
+| 0x4
+| MasterHashSize
+|-
+| 0xC
+| 0xB4
+| [[#InfoLevelHash|InfoLevelHash]]
+|-
+| 0xC0
+| 0x20
+| MasterHash
+|-
+| 0xE0
+| 0x18
+| Reserved
+|}
+
+==== InfoLevelHash ====
+{| class="wikitable" border="1"
+|-
+! Offset
+! Size
+! Description
+|-
+| 0x0
+| 0x4
+| MaxLayers
+|-
+| 0x4
+| 0x90
+| [[#HierarchicalIntegrityVerificationLevelInformation|Levels]]
+|-
+| 0x94
+| 0x20
+| SignatureSalt
+|}
+
+===== HierarchicalIntegrityVerificationLevelInformation =====
+{| class="wikitable" border="1"
+|-
+! Offset
+! Size
+! Description
+|-
+| 0x0
+| 0x8
+| LogicalOffset
+|-
+| 0x8
+| 0x8
+| HashDataSize
+|-
+| 0x10
+| 0x4
+| BlockSize (in log2)
+|-
+| 0x14
+| 0x4
+| Reserved
+|}
+
+== PatchInfo ==
+{| class="wikitable" border="1"
+|-
+! Offset
+! Size
+! Description
+|-
+| 0x0
+| 0x8
+| IndirectOffset
+|-
+| 0x8
+| 0x8
+| IndirectSize
+|-
+| 0x10
+| 0x10
+| [[#BucketTreeHeader|IndirectHeader]]
+|-
+| 0x20
+| 0x8
+| AesCtrExOffset
+|-
+| 0x28
+| 0x8
+| AesCtrExSize
+|-
+| 0x30
+| 0x10
+| [[#BucketTreeHeader|AesCtrExHeader]]
+|}
+
+The above byte-offsets are relative to the start of the section-data.
+
+The two sections specified by the two BKTR entries are usually(?) at the very end of the section data(section_endoffset-{size of BKTR sections}).
+
+=== RomFs Patching ===
+The [[#PatchInfo|PatchInfo]] section enables combining data from an update NCA with the RomFs from a base NCA to create a single patched RomFS image. 
+
+The first BKTR entry describes how to map regions of the two RomFs images to create the patched RomFs. It has the following format:
+{| class="wikitable" border="1"
+|-
+! Offset
+! Size
+! Description
+|-
+| 0x0
+| 0x4
+| Padding/Unused?
+|-
+| 0x4
+| 0x4
+| Number of Buckets
+|-
+| 0x8
+| 0x8
+| Total Size of the Virtual RomFS Image
+|-
+| 0x10
+| 0x3FF0
+| Base Virtual Offset for each Bucket (u64s, padded with 0s until end)
+|-
+| 0x4000
+| 0x4000*X
+| Relocation Buckets
+|}
+
+Where relocation buckets are as follows:
+{| class="wikitable" border="1"
+|-
+! Offset
+! Size
+! Description
+|-
+| 0x0
+| 0x4
+| Padding/Unused?
+|-
+| 0x4
+| 0x4
+| Number of Entries
+|-
+| 0x8
+| 0x8
+| End offset for this Bucket
+|-
+| 0x10
+| 0x3FF0
+| Relocation Entries
+|}
+
+Where relocation entries are as follows:
+{| class="wikitable" border="1"
+|-
+! Offset
+! Size
+! Description
+|-
+| 0x0
+| 0x8
+| Address in Patched RomFs
+|-
+| 0x8
+| 0x8
+| Address in Source RomFs
+|-
+| 0x10
+| 0x4
+| 1=Is from Patch RomFS, 0=Is from Base RomFS
+|}
+
+The second BKTR entry describes the subsections within the Patch RomFs. It has the following format:
+{| class="wikitable" border="1"
+|-
+! Offset
+! Size
+! Description
+|-
+| 0x0
+| 0x4
+| Padding/Unused?
+|-
+| 0x4
+| 0x4
+| Number of Buckets
+|-
+| 0x8
+| 0x8
+| Total Size of the Physical Patch Image
+|-
+| 0x10
+| 0x3FF0
+| Base Physical Offset for each Bucket (u64s, padded with 0s until end)
+|-
+| 0x4000
+| 0x4000*X
+| Subsection Buckets
+|}
+
+Where subsection buckets are as follows:
+{| class="wikitable" border="1"
+|-
+! Offset
+! Size
+! Description
+|-
+| 0x0
+| 0x4
+| Padding/Unused?
+|-
+| 0x4
+| 0x4
+| Number of Entries
+|-
+| 0x8
+| 0x8
+| End offset for this Bucket
+|-
+| 0x10
+| 0x3FF0
+| Subsection Entries
+|}
+
+Where subsection entries are as follows:
+{| class="wikitable" border="1"
+|-
+! Offset
+! Size
+! Description
+|-
+| 0x0
+| 0x8
+| Address in Patch RomFs
+|-
+| 0x8
+| 0x4
+| Padding/Unused?
+|-
+| 0xC
+| 0x4
+| Value for subsection AES-CTR
+|}
+
+Official code assumes the relocation entries are sorted, and performs a binary search when determining where to read from. Each subsection in the Patch RomFs has its CTR calculated separately from the others based on the value in its entry (the BKTR entries use normal crypto). Thus decrypting a Patch RomFS requires decrypting and parsing the BKTR entries before anything else.
+
+== SparseInfo ==
+{| class="wikitable" border="1"
+|-
+! Offset
+! Size
+! Description
+|-
+| 0x0
+| 0x8
+| TableOffset
+|-
+| 0x8
+| 0x8
+| TableSize
+|-
+| 0x10
+| 0x10
+| [[#BucketTreeHeader|TableHeader]]
+|-
+| 0x20
+| 0x8
+| PhysicalOffset
+|-
+| 0x28
+| 0x2
+| Generation
+|-
+| 0x2A
+| 0x6
+| Reserved
+|}
+
+== CompressionInfo ==
+{| class="wikitable" border="1"
+|-
+! Offset
+! Size
+! Description
+|-
+| 0x0
+| 0x8
+| TableOffset
+|-
+| 0x8
+| 0x8
+| TableSize
+|-
+| 0x10
+| 0x10
+| [[#BucketTreeHeader|TableHeader]]
+|-
+| 0x20
+| 0x8
+| Reserved
+|}
+
+== BucketTreeHeader ==
+{| class="wikitable" border="1"
+|-
+! Offset
+! Size
+! Description
+|-
+| 0x0
+| 0x4
+| Magic ("BKTR")
+|-
+| 0x4
+| 0x4
+| Version
+|-
+| 0x8
+| 0x4
+| EntryCount
+|-
+| 0xC
+| 0x4
+| Reserved
+|}
+
+== MetaDataHashDataInfo ==
+{| class="wikitable" border="1"
+|-
+! Offset
+! Size
+! Description
+|-
+| 0x0
+| 0x8
+| TableOffset
+|-
+| 0x8
+| 0x8
+| TableSize
+|-
+| 0x10
+| 0x20
+| TableHash
+|}
+
+= Logo Section =
+This is a PFS0.
+
+See [[NCA_Content_FS|here]] for the mounted-FS logo contents.
+
+= ExeFS Section =
+This is a PFS0.
+
+See [[ExeFS|here]] for mounted-FS ExeFS contents.
+
+= Game Updates =
+The section-data for ncatype1 RomFS section(section1) uses section-crypto-type 0x4.
+
+Game updates also contain multiple ncatype6 content, which contain "section0_pfs0/fragment". Some of these are just NCAs, unknown for the rest(presumably NCAs with additional crypto?). The first ncatype6 content fragment file has a NDV0 header, with the NCA starting at offset 0x44.
+
+= PFS0 =
+{| class="wikitable" border="1"
+|-
+! Offset
+! Size
+! Description
+|-
+| {Hash-table offset from superblock}
+| {Hash-table size from superblock}
+| Table of SHA256 hashes.
+|-
+| {Hash-table <offset+size> from superblock}
+| 
+| Zeros for alignment to {alignment size}.
+|-
+| {PFS0 offset from superblock}
+| {PFS0 size from superblock}
+| The actual PFS0.
+|}
+
+This is the FS which has magicnum "PFS0" at header+0. This is very similar to [[Gamecard_Format|HFS0]]. A tool for extracting this FS is available [https://gist.github.com/yellows8/1a96c2b846f4ebc4bb45d7f7fa1eb7db here].
+
+The hash table is hashes for every {Block size from superblock} starting at the PFS0 header. The size used for the last hash is {PFS0 filesystem size from superblock} - offset_relativeto_header.
+
+See also the PFS0 superblock above.
+
+{| class="wikitable" border="1"
+|-
+! Offset
+! Size
+! Description
+|-
+| 0x0
+| 0x4
+| Magic ("PFS0")
+|-
+| 0x4
+| 0x4
+| EntryCount
+|-
+| 0x8
+| 0x4
+| StringTableSize
+|-
+| 0xC
+| 0x4
+| Reserved
+|-
+| 0x10
+| X
+| [[#PartitionEntry|PartitionEntryTable]]
+|-
+| 0x10 + X
+| Y
+| StringTable
+|-
+| 0x10 + X + Y
+| Z
+| FileData
+|}
+
+== PartitionEntry ==
+{| class="wikitable" border="1"
+|-
+! Offset
+! Size
+! Description
+|-
+| 0x0
+| 0x8
+| Offset
+|-
+| 0x8
+| 0x8
+| Size
+|-
+| 0x10
+| 0x4
+| StringOffset
+|-
+| 0x14
+| 0x4
+| Reserved
+|}
