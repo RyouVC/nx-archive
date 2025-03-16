@@ -1,13 +1,11 @@
-use aes::cipher::generic_array::GenericArray;
-use aes::cipher::{BlockCipher, BlockDecrypt, BlockEncrypt, KeyInit, typenum};
-use aes::{Aes128, Aes256};
 use binrw::prelude::*;
 use std::io::{Read, Seek};
-use xts_mode::Xts128;
+use std::path::Path;
+mod types;
 
 use super::Keyset;
 use super::keyset::get_nintendo_tweak;
-
+use types::*;
 // The first 0xC00 bytes are encrypted with AES-XTS with sector size 0x200
 // with a non-standard "tweak" (endianness is reversed as big endian), this
 // encrypted data is an 0x400 NCA header + an 0x200 header for each section
@@ -138,10 +136,10 @@ pub struct NcaHeader {
     // So, the version number is the 4th byte, and is a char.
     /// NCA Version, extracted from the last byte of the magic number.
     pub nca_version: NcaVersion,
-    pub distribution: u8,
-    pub content_type: u8,
-    pub key_generation_old: u8,
-    pub key_area_appkey_index: u8,
+    pub distribution: DistributionType,
+    pub content_type: ContentType,
+    pub key_generation_old: KeyGenerationOld,
+    pub key_area_appkey_index: KeyAreaEncryptionKeyIndex,
     pub content_size: u64,
     pub program_id: u64,
     pub content_index: u32,
@@ -151,7 +149,7 @@ pub struct NcaHeader {
     // 0xe
     #[br(count = 0xE)]
     #[brw(pad_size_to = 0xE)]
-    pub _reserved: Vec<u8>,
+    _reserved: Vec<u8>,
     #[br(count = 0x10)]
     #[brw(pad_size_to = 0x10)]
     pub rights_id: Vec<u8>,
@@ -231,51 +229,39 @@ impl NcaHeader {
     }
 }
 
-// #[test]
-// pub fn decrypt_nca_header() -> color_eyre::Result<()> {
-//     use aes::Aes128;
-//     use aes::cipher::typenum::U16;
-//     let keyset = Keyset::from_file("prod.keys")?;
+#[test]
+pub fn decrypt_nca_header() -> color_eyre::Result<()> {
+    let keyset = Keyset::from_file("prod.keys")?;
 
-//     let mut nca = std::fs::File::open("test/Browser/cf03cf6a80796869775f77e0c61e136e.cnmt.nca")?;
+    let file_path = Path::new("test/Browser/2b9b99ea58139c320c82055c337135df.nca");
+    let nca = std::fs::File::open(file_path)?;
 
-//     let mut reader = std::io::BufReader::new(nca);
+    let filename = file_path.file_name().unwrap().to_str().unwrap();
+    println!("Decrypting NCA: {}", filename);
 
-//     let key = keyset.header_key;
+    let mut reader = std::io::BufReader::new(nca);
 
-//     // take 0xC00
-//     let mut header = vec![0; 0xC00];
-//     reader.read_exact(&mut header)?;
+    // Let's try and decrypt the header first.
+    let mut buf = vec![0; 0xC00];
+    reader.read_exact(&mut buf)?;
 
-//     // The first 0xC00 bytes are encrypted with AES-XTS with sector size 0x200 with a non-standard "tweak"
-//     let mut decrypted = vec![0; 0xC00];
-//     let mut encrypted = vec![0; 0xC00];
-//     encrypted.copy_from_slice(&header);
-//     decrypted.copy_from_slice(&header);
+    let decrypted = decrypt_with_header_key(&buf, &keyset, 0x200, 0);
 
-//     let cipher_1 = Aes128::new(GenericArray::from_slice(&key[..0x10]));
-//     let cipher_2 = Aes128::new(GenericArray::from_slice(&key[0x10..]));
+    // take the 0x340 bytes for the header
+    let header_bytes = &decrypted[..0x340];
+    let remaining = &decrypted[0x340..];
 
-//     let xts: Xts128<Aes128> = Xts128::new(cipher_1, cipher_2);
+    // dump remaining bytes into a file
+    let mut remaining_file = std::fs::File::create(format!("test_tmp/{filename}_remaining.bin"))?;
 
-//     let sector_size = 0x200;
-//     let first_sector_index = 0;
-//     xts.decrypt_area(&mut decrypted, sector_size, first_sector_index, |sector| {
-//         get_nintendo_tweak(sector).into()
-//     });
+    // dump remaining
+    std::io::Write::write_all(&mut remaining_file, remaining)?;
 
-//     // dump to file for debugging
-//     std::fs::write("decrypted_header.bin", &decrypted)?;
+    let header = NcaHeader::from_bytes(&header_bytes.try_into().unwrap())?;
 
-//     let header: NcaHeader = binrw::io::Cursor::new(&decrypted).read_be()?;
-
-//     println!("{:#?}", header);
-
-//     // Check if the magic starts with b"NCA"
-//     // assert_eq!(&header.magic[0..3], b"NCA");
-
-//     Ok(())
-// }
+    println!("{:?}", header);
+    Ok(())
+}
 
 #[cfg(test)]
 mod tests {
@@ -329,10 +315,10 @@ mod tests {
             header_sig: vec![],
             header_key_sig: vec![],
             nca_version: NcaVersion::from_char('3'),
-            distribution: 0,
-            content_type: 0,
-            key_generation_old: 0,
-            key_area_appkey_index: 0,
+            distribution: DistributionType::Download,
+            content_type: ContentType::Program,
+            key_generation_old: KeyGenerationOld::Gen3_0_0,
+            key_area_appkey_index: KeyAreaEncryptionKeyIndex::Application,
             content_size: 0,
             program_id: 0,
             content_index: 0,
@@ -358,10 +344,10 @@ mod tests {
             header_sig: vec![0; 0x100],
             header_key_sig: vec![0; 0x100],
             nca_version: NcaVersion::from_char('3'),
-            distribution: 0,
-            content_type: 0,
-            key_generation_old: 0,
-            key_area_appkey_index: 0,
+            distribution: DistributionType::Download,
+            content_type: ContentType::Program,
+            key_generation_old: KeyGenerationOld::Gen3_0_0,
+            key_area_appkey_index: KeyAreaEncryptionKeyIndex::Application,
             content_size: 0,
             program_id: 0,
             content_index: 0,
@@ -374,8 +360,8 @@ mod tests {
             sha256_hashes: vec![],
             encrypted_keys: vec![],
         };
-        assert_eq!(header.nca_version, NcaVersion(b'3'));
-        println!("{:#?}", header.nca_version);
+        let header_bytes = header.to_bytes();
+        assert_eq!(&header_bytes[0x200..0x204], b"NCA3");
     }
 
     #[test]
@@ -384,10 +370,10 @@ mod tests {
             header_sig: vec![0; 0x100],
             header_key_sig: vec![0; 0x100],
             nca_version: NcaVersion::from_char('3'),
-            distribution: 0,
-            content_type: 0,
-            key_generation_old: 0,
-            key_area_appkey_index: 0,
+            distribution: DistributionType::Download,
+            content_type: ContentType::Program,
+            key_generation_old: KeyGenerationOld::Gen3_0_0,
+            key_area_appkey_index: KeyAreaEncryptionKeyIndex::Application,
             content_size: 0,
             program_id: 0,
             content_index: 0,
