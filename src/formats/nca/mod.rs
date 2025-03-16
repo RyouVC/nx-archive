@@ -395,17 +395,60 @@ impl<R: Read + Seek> Nca<R> {
                 KeyAreaEncryptionKeyIndex::System => {
                     let key = keyset.get_key_area_key_system(key_gen as usize);
                     key.map(|k| k.as_slice())
-                }
-                _ => None,
+                } // _ => None,
             };
 
             // If we have a key, decrypt the key area
             if let Some(key) = key_area_key {
-                // TODO: Properly decrypt the key area
-                // For now just copy the encrypted key area
-                dec_key_area = header.encrypted_keys.clone();
+                println!("Key area key found, decrypting key area");
+                println!(
+                    "Encrypted key area: {:02X?}",
+                    header.encrypted_keys.aes_ctr_key
+                );
+
+                // Properly decrypt the key area using ECB Decryptor, matching CNTX implementation
+                use cipher::BlockDecryptMut;
+                use cipher::KeyInit;
+
+                // Create a copy of the encrypted key area
+                let mut key_area_copy = header.encrypted_keys.clone();
+
+                // Define the type for our ECB decryptor
+                type Aes128EcbDec = ecb::Decryptor<aes::Aes128>;
+
+                // Create an ECB decryptor with our key and no padding
+                let mut decryptor = Aes128EcbDec::new_from_slice(key)
+                    .map_err(|_| "Failed to create ECB decryptor")?;
+
+                // Decrypt the key area in-place
+                // The key area is exactly 64 bytes (0x40), which is a multiple of the AES block size (16 bytes)
+                // So we don't need to worry about padding
+                decryptor.decrypt_blocks_mut(unsafe {
+                    core::slice::from_raw_parts_mut(
+                        &mut key_area_copy as *mut KeyArea as *mut aes::Block,
+                        std::mem::size_of::<KeyArea>() / 16, // 4 blocks of 16 bytes each
+                    )
+                });
+
+                dec_key_area = key_area_copy;
+                println!(
+                    "Decrypted key area AES-CTR key: {:02X?}",
+                    dec_key_area.aes_ctr_key
+                );
+
+                // Debug comparison with CNTX's key
+                let debug_key = [0x04; 0x10];
+                println!("Debug key used by CNTX: {:02X?}", debug_key);
+                if dec_key_area.aes_ctr_key == debug_key {
+                    println!(
+                        "Our decrypted key matches CNTX's key! Decryption should work correctly."
+                    );
+                } else {
+                    println!(
+                        "Key doesn't match CNTX debug key. This might cause decryption issues."
+                    );
+                }
             } else {
-                // If we're here, we couldn't get the key area key
                 tracing::warn!(
                     "Key area key of type {:?} not present for key generation {}",
                     header.key_area_appkey_index,
@@ -507,35 +550,22 @@ impl<R: Read + Seek> Nca<R> {
 
         if let Some(dec_key) = self.dec_title_key {
             // Use the already-decrypted title key
-            println!("Using decrypted title key");
+            println!("Using decrypted title key: {:02X?}", dec_key);
             Ok(dec_key)
         } else {
-            println!("Using decrypted key area key");
-            // ISSUE: Debug why our key is different than CNTX's
-            // For now, print debug info about the key_area
             println!(
-                "KeyArea in header: {:02X?}",
-                self.header.encrypted_keys.aes_ctr_key
-            );
-            println!(
-                "Our decrypted KeyArea: {:02X?}",
+                "Using decrypted key area key: {:02X?}",
                 self.dec_key_area.aes_ctr_key
             );
-
-            // TODO: In a real fix, we need to properly decrypt this key
-            // For now, hardcode the key that CNTX uses for debugging
-            let debug_key = [0x04; 0x10];
-            println!("WARNING: Using debug key to match CNTX: {:02X?}", debug_key);
-            // Use the decrypted key area's AES-CTR key
-            Ok(debug_key) // Changed temporarily for debugging
-            // Ok(self.dec_key_area.aes_ctr_key) // Original code
+            // Use the properly decrypted key area's AES-CTR key
+            Ok(self.dec_key_area.aes_ctr_key)
         }
     }
 
     pub fn open_pfs0_filesystem(
         &mut self,
         idx: usize,
-        _keyset: &Keyset,
+        // keyset: &Keyset,
     ) -> Result<Pfs0<Box<dyn ReadSeek + '_>>, Box<dyn std::error::Error>> {
         if idx >= self.fs_headers.len() {
             return Err("Invalid filesystem index".into());
@@ -595,9 +625,9 @@ impl<R: Read + Seek> Nca<R> {
             EncryptionType::AesCtr => {
                 println!("Using AES-CTR decryption");
 
-                // Get the decryption key - hardcoded to match CNTX for now
-                let debug_key = [0x04; 0x10].to_vec();
-                println!("Using debug key: {:02X?}", debug_key);
+                // Get the proper decryption key from our key area
+                let decrypt_key = self.get_aes_ctr_decrypt_key()?.to_vec();
+                println!("Using decryption key: {:02X?}", decrypt_key);
 
                 // Determine the PFS0 data offset - use direct field as CNTX does
                 let pfs0_offset = match &fs_header.hash_data {
@@ -624,9 +654,9 @@ impl<R: Read + Seek> Nca<R> {
                 // Create a reader for the NCA file
                 let reader = std::io::BufReader::new(self.reader.by_ref());
 
-                // Create the AES-CTR reader to match CNTX's implementation exactly
+                // Create the AES-CTR reader using our properly decrypted key
                 let mut aes_reader =
-                    Aes128CtrReader::new(reader, pfs0_offset, fs_header.ctr, debug_key);
+                    Aes128CtrReader::new(reader, pfs0_offset, fs_header.ctr, decrypt_key);
 
                 // Read and verify the magic bytes
                 let mut magic = [0u8; 4];
@@ -706,20 +736,30 @@ pub fn decrypt_nca_header() -> color_eyre::Result<()> {
     let file_path_clone = file_path.to_path_buf();
 
     // Add a hexdump of the first few bytes to debug the issue
-    let fs_offset = nca.get_fs_offset(0);
-    let pfs0_result = nca.open_pfs0_filesystem(0, &keyset);
-    match pfs0_result {
-        Ok(_pfs0) => println!("PFS0 opened successfully!"),
-        Err(e) => {
-            println!("Failed to open PFS0: {}", e);
-            // For further debugging, you could try reading raw bytes from the offset
-            if let Some(fs_offset) = fs_offset {
-                println!("Dumping raw bytes from offset 0x{:X}", fs_offset);
-                let mut raw_reader = std::fs::File::open(file_path_clone)?;
-                raw_reader.seek(std::io::SeekFrom::Start(fs_offset))?;
-                let mut buf = [0u8; 0x100];
-                raw_reader.read_exact(&mut buf)?;
-                println!("Raw bytes: {:02X?}", &buf[..16]);
+    // Iterate over all filesystems in the NCA
+    for fs_idx in 0..nca.filesystem_count() {
+        println!("\nTrying filesystem {}", fs_idx);
+        let fs_offset = nca.get_fs_offset(fs_idx);
+        let pfs0_result = nca.open_pfs0_filesystem(fs_idx);
+
+        match pfs0_result {
+            Ok(pfs0) => {
+                println!("PFS0 #{} opened successfully!", fs_idx);
+                if let Ok(files) = pfs0.list_files() {
+                    println!("Files in PFS0 #{}: {:?}", fs_idx, files);
+                }
+            }
+            Err(e) => {
+                println!("Failed to open PFS0 #{}: {}", fs_idx, e);
+                // For further debugging, you could try reading raw bytes from the offset
+                if let Some(fs_offset) = fs_offset {
+                    println!("Dumping raw bytes from offset 0x{:X}", fs_offset);
+                    let mut raw_reader = std::fs::File::open(&file_path_clone)?;
+                    raw_reader.seek(std::io::SeekFrom::Start(fs_offset))?;
+                    let mut buf = [0u8; 0x100];
+                    raw_reader.read_exact(&mut buf)?;
+                    println!("Raw bytes: {:02X?}", &buf[..16]);
+                }
             }
         }
     }
