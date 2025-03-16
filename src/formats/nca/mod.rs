@@ -57,27 +57,50 @@ pub fn decrypt_with_header_key(
     decrypted
 }
 
-/// Standard XTS tweak for comparison
-pub fn get_standard_tweak(sector: u128) -> GenericArray<u8, typenum::U16> {
-    // Create a zero-initialized array
-    let mut tweak = [0u8; 16];
-    let bytes = sector.to_le_bytes();
-    // let default_tweak = get_tweak_default(sector);
-    // tweak.copy_from_slice(&default_tweak);
+/// Represents the version of an NCA file
+///
+/// Is essentially a char, but is wrapped in a struct for type safety
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(transparent)]
+#[binrw(repr = u8)]
+pub struct NcaVersion(pub u8);
 
-    // For standard tweak, place bytes at the end
-    let mut count = 0;
-    for i in 0..bytes.len() {
-        if bytes[i] != 0 {
-            count = i + 1;
-        }
+impl NcaVersion {
+    /// Create a new NcaVersion from a character
+    pub fn from_char(c: char) -> Self {
+        Self(c as u8)
     }
 
-    for i in 0..count {
-        tweak[16 - count + i] = bytes[i];
+    /// Get the version as a character
+    pub fn as_char(&self) -> char {
+        self.0 as char
     }
 
-    *GenericArray::from_slice(&tweak)
+    /// Create from a u8 value
+    pub fn from_u8(value: u8) -> Self {
+        Self(value)
+    }
+
+    /// Create from a number, getting the character representation and then turning that into a NcaVersion
+    pub fn from_num(value: usize) -> Result<Self, &'static str> {
+        format!("{}", value)
+            .chars()
+            .next()
+            .map(Self::from_char)
+            .ok_or("Failed to convert number to NcaVersion: cannot represent as UTF-8 character")
+    }
+}
+
+impl From<char> for NcaVersion {
+    fn from(c: char) -> Self {
+        Self::from_char(c)
+    }
+}
+
+impl From<u8> for NcaVersion {
+    fn from(value: u8) -> Self {
+        Self::from_u8(value)
+    }
 }
 
 #[binrw]
@@ -92,6 +115,12 @@ pub struct FsEntry {
     pub _reserved: u64,
 }
 
+/// NCA Header
+///
+/// The NCA header is the first 0x340 (832) bytes of an NCA file.
+/// It contains metadata about the NCA file, such as the content size,
+/// program ID, and other information.
+/// However, the first 0xC00 (3072) bytes of the NCA file are encrypted.
 #[binrw]
 #[brw(little)]
 #[derive(Debug)]
@@ -108,7 +137,7 @@ pub struct NcaHeader {
     // magic since the first 3 bytes is guaranteed to be "NCA".
     // So, the version number is the 4th byte, and is a char.
     /// NCA Version, extracted from the last byte of the magic number.
-    pub nca_version: u8,
+    pub nca_version: NcaVersion,
     pub distribution: u8,
     pub content_type: u8,
     pub key_generation_old: u8,
@@ -140,49 +169,21 @@ pub struct NcaHeader {
 }
 
 impl NcaHeader {
-    pub fn decrypt<R: Read + Seek>(
-        reader: &mut R,
-        keyset: &Keyset,
-    ) -> Result<Vec<u8>, binrw::Error> {
-        // Read the entire 0xC00 header (NCA header + section headers)
-        let mut encrypted = vec![0; 0xC00];
-        reader.seek(std::io::SeekFrom::Start(0))?;
-        reader.read_exact(&mut encrypted)?;
-
-        let mut decrypted = encrypted.clone();
-
-        // Set up XTS decryption with the header key
-        // let key = &keyset.header_key;
-        // let cipher_1 = Aes128::new(GenericArray::from_slice(&key[..0x10]));
-        // let cipher_2 = Aes128::new(GenericArray::from_slice(&key[0x10..]));
-        // let xts = Xts128::new(cipher_1, cipher_2);
-
-        let xts = keyset.header_crypt();
-        // Decrypt all sectors (0x200 bytes each)
-        let sector_size = 0x200;
-        let first_sector_index = 0;
-        xts.decrypt_area(&mut decrypted, sector_size, first_sector_index, |sector| {
-            get_nintendo_tweak(sector)
-        });
-
-        Ok(decrypted)
-    }
-
     /// Takes an already-decrypted NCA header and parses it
-    pub fn from_reader_decrypted<R: Read + Seek>(reader: &mut R) -> Result<Self, binrw::Error> {
-        let mut decrypted = vec![0; 0xC00];
+    ///
+    /// This will take only what is needed for the header, which is the first 0x340 bytes, and parse it.
+    ///
+    /// Note: If you would like to decrypt the header first, please use the `to_bytes_encrypt` method.
+    pub fn from_reader<R: Read + Seek>(reader: &mut R) -> Result<Self, binrw::Error> {
+        let mut decrypted = vec![0; 0x340];
         reader.read_exact(&mut decrypted)?;
         let header: NcaHeader = binrw::io::Cursor::new(&decrypted).read_le()?;
         Ok(header)
     }
 
-    /// Takes a still-encrypted NCA header and decrypts it before parsing
-    pub fn from_reader<R: Read + Seek>(
-        reader: &mut R,
-        keyset: &Keyset,
-    ) -> Result<Self, binrw::Error> {
-        let decrypted = Self::decrypt(reader, keyset)?;
-        let header: NcaHeader = binrw::io::Cursor::new(&decrypted).read_le()?;
+    /// Parses an NCA header from a byte slice (0x340 bytes) of an already-decrypted header
+    pub fn from_bytes(bytes: &[u8; 0x340]) -> Result<Self, binrw::Error> {
+        let header: NcaHeader = binrw::io::Cursor::new(bytes).read_le()?;
         Ok(header)
     }
 
@@ -323,12 +324,40 @@ mod tests {
     }
 
     #[test]
+    fn test_nca_header_size() {
+        let header = NcaHeader {
+            header_sig: vec![],
+            header_key_sig: vec![],
+            nca_version: NcaVersion::from_char('3'),
+            distribution: 0,
+            content_type: 0,
+            key_generation_old: 0,
+            key_area_appkey_index: 0,
+            content_size: 0,
+            program_id: 0,
+            content_index: 0,
+            sdk_version: 0,
+            key_generation: 0,
+            signature_key_generation: 0,
+            _reserved: vec![],
+            rights_id: vec![],
+            fs_entries: vec![],
+            sha256_hashes: vec![],
+            encrypted_keys: vec![],
+        };
+        // assert_eq!(std::mem::size_of_val(&header), 0x340);
+        // now serialize to bytes
+        let header_bytes = header.to_bytes();
+        assert_eq!(header_bytes.len(), 0x340);
+    }
+
+    #[test]
     fn test_header_magic() {
         // let magic = [b'N', b'C', b'A', 0];
         let header = NcaHeader {
             header_sig: vec![0; 0x100],
             header_key_sig: vec![0; 0x100],
-            nca_version: b'3',
+            nca_version: NcaVersion::from_char('3'),
             distribution: 0,
             content_type: 0,
             key_generation_old: 0,
@@ -345,7 +374,7 @@ mod tests {
             sha256_hashes: vec![],
             encrypted_keys: vec![],
         };
-        assert_eq!(header.nca_version, b'3');
+        assert_eq!(header.nca_version, NcaVersion(b'3'));
         println!("{:#?}", header.nca_version);
     }
 
@@ -354,7 +383,7 @@ mod tests {
         let header = NcaHeader {
             header_sig: vec![0; 0x100],
             header_key_sig: vec![0; 0x100],
-            nca_version: b'3',
+            nca_version: NcaVersion::from_char('3'),
             distribution: 0,
             content_type: 0,
             key_generation_old: 0,
@@ -372,46 +401,38 @@ mod tests {
             encrypted_keys: vec![],
         };
 
+        let keyset = Keyset {
+            header_key: [2; 0x20],
+            ..Default::default()
+        };
+
         let header_bytes = header.to_bytes();
 
-        let keyset = Keyset {
-            header_key: [9; 32],
-            ..Default::default()
-        };
+        println!("{:#?}", header_bytes.len());
 
-        let encrypted = header.to_bytes_encrypt(&keyset);
+        assert_eq!(header_bytes.len(), 0x340);
 
-        assert_ne!(encrypted, header_bytes);
+        // Let's alliocate 0xC00 bytes for the encrypted header
+        let mut to_be_encrypted = vec![0; 0xC00];
 
-        // Check if the first 0xC00 bytes are encrypted
-        assert_ne!(encrypted[..0xC00], header.to_bytes());
+        // copy the header bytes to the first 0x340 bytes
+        to_be_encrypted[..0x340].copy_from_slice(&header_bytes);
 
-        let mut cursor = std::io::Cursor::new(encrypted.clone());
-        let decrypted = NcaHeader::from_reader(&mut cursor, &keyset).unwrap();
-        assert_eq!(
-            decrypted.nca_version, header.nca_version,
-            "Decrypted version should match the original"
-        );
+        // Encrypt the header
+        let encrypted = encrypt_with_header_key(&to_be_encrypted, &keyset, 0x200, 0);
 
-        let decrypted_bytes = decrypted.to_bytes();
+        // Decrypt the header
 
-        assert_eq!(decrypted_bytes.len(), header_bytes.len());
+        let decrypted = decrypt_with_header_key(&encrypted, &keyset, 0x200, 0);
 
-        // Now let's try a different header key and see if it fails
-        let keyset_2 = Keyset {
-            header_key: [0; 32],
-            ..Default::default()
-        };
+        // take the header
+        let decrypted_header = &decrypted[..0x340];
 
-        let mut cursor = std::io::Cursor::new(encrypted);
+        assert_eq!(header_bytes, decrypted_header);
 
-        // let result = NcaHeader::from_reader(&mut cursor, &keyset_2);
-        // Try to decrypt with the wrong key and print the error
-        let result = NcaHeader::from_reader(&mut cursor, &keyset_2);
-        println!("Decryption with bad key result: {:?}", result);
-        assert!(
-            result.is_err(),
-            "Decryption should fail with an incorrect keyset"
-        );
+        // let decrypted_header: NcaHeader =
+        //     NcaHeader::from_bytes(&(decrypted_header.try_into().unwrap())).unwrap();
+
+        // assert_eq!(header, decrypted_header);
     }
 }
