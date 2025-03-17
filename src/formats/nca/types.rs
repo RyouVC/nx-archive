@@ -158,8 +158,10 @@ pub enum MetaDataHashType {
 #[binrw]
 #[brw(little)]
 #[derive(Debug, PartialEq, Eq)]
-#[br(import(hash_type: HashType))]
 pub enum HashData {
+    // We don't want to actually pre-assert this since binrw
+    // looks for the magic byte at the start of the struct, and we know
+    // that IVFC is the only variant that starts with that magic byte.
     // #[br(pre_assert(hash_type == HashType::HierarchicalSha256Hash))]
     HierarchicalSha256Hash {
         #[brw(pad_size_to = 0x20)]
@@ -192,8 +194,8 @@ pub enum HashData {
         _reserved4: Vec<u8>,
     },
     // #[br(pre_assert(hash_type == HashType::HierarchicalIntegrityHash))]
+    #[br(magic = b"IVFC")]
     HierarchicalIntegrity {
-        #[br(magic = b"IVFC")]
         version: u32,
         #[brw(pad_size_to = 0x4)]
         master_hash_size: u32,
