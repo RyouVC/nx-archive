@@ -28,6 +28,7 @@ tracing = "0"
 xts = "0.0.0"
 xts-mode = "0.5.1"
 ctr6 = { package = "ctr", version = "0.6" }
+dirs = "6.0.0"
 
 [dev-dependencies]
 color-eyre = "0.6.3"
