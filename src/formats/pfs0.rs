@@ -1,5 +1,14 @@
 //! # Nintendo PFS0 (PartitionFS0) format
 //!
+//! The Partition File System (PFS0) format is a simple archive format used by Nintendo Switch for packaging files.
+//!
+//! They are also known as NSP (Nintendo Submission Package) files, which are simply PFS0 images packed
+//! for distribution.
+//!
+//! These files are used to store nested game archives, such as NCA files, which contain the actual game data.
+//!
+//! They also usually install cryptographic tickets and metadata files, which are used to identify and
+//! enforce DRM restrictions on the game.
 //!
 
 use std::io::{Read, Seek, SeekFrom};
