@@ -39,10 +39,11 @@ mod types;
 use tracing::instrument;
 
 // Use the ReadSeek trait from io module instead of from crate root
-use crate::io::{Aes128CtrReader, ReadSeek, SharedReader};
+use crate::io::{Aes128CtrReader, ReadSeek, SharedReader, SubFile};
 
 use super::keyset::get_nintendo_tweak;
 use super::pfs0::Pfs0;
+use super::romfs::RomFs; // Add import for RomFs
 use super::{Keyset, TitleKeys};
 use types::*;
 // The first 0xC00 bytes are encrypted with AES-XTS with sector size 0x200
@@ -602,158 +603,214 @@ impl<R: Read + Seek> Nca<R> {
         }
     }
 
+    /// Private helper method to prepare a reader for any filesystem type
     #[instrument(level = "trace", skip(self))]
-    pub fn open_pfs0_filesystem(
+    fn prepare_fs_reader(
         &mut self,
         idx: usize,
-    ) -> Result<Pfs0<Box<dyn ReadSeek + '_>>, Box<dyn std::error::Error>> {
+        // fs_type: FsType,
+        // fs_name: &str,
+    ) -> Result<Box<dyn ReadSeek + '_>, Box<dyn std::error::Error>> {
         if idx >= self.fs_headers.len() {
             return Err("Invalid filesystem index".into());
         }
 
         let fs_header = &self.fs_headers[idx];
-        if fs_header.fs_type != FsType::PartitionFs {
-            return Err(format!("Invalid filesystem type: {:?}", fs_header.fs_type).into());
-        }
+        // if fs_header.fs_type != fs_type {
+        //     return Err(format!("Invalid filesystem type: {:?}", fs_header.fs_type).into());
+        // }
 
         let fs_start_offset = self
             .get_fs_offset(idx)
             .ok_or("Failed to get filesystem offset")?;
 
         tracing::trace!(
-            pfs0_index = idx,
+            fs_index = idx,
             fs_start_offset = format!("0x{:X}", fs_start_offset),
             fs_type = ?fs_header.fs_type,
             encryption_type = ?fs_header.encryption_type,
             hash_type = ?fs_header.hash_type,
             counter = format!("0x{:X}", fs_header.ctr),
-            "Opening PFS0 filesystem"
+            "Opening filesystem sector",
         );
+
+        // Determine the filesystem data offset based on hash data structure
+
+        // This will be different depending on the encryption type.
+        // For unencrypted filesystems, we use this offset directly though. I think.
+        let fs_offset_abs = match &fs_header.hash_data {
+            HashData::HierarchicalSha256(hash) => {
+                tracing::trace!(?hash, "Hierarchical SHA-256 hash data");
+                // for SHA-256 hashes, we get the offset from the first (actually second)
+                // level of the hash data
+                hash.layer_regions[0].offset
+            }
+            HashData::HierarchicalIntegrity(hash) => {
+                tracing::trace!(?hash, "Hierarchical Integrity hash data");
+                // for Integrity hashes, we get the offset from the last level
+                hash.info_level_hash.levels.last().unwrap().logical_offset
+            }
+        } + fs_start_offset;
+
+        tracing::trace!(
+            fs_offset_abs = format!("0x{:X}", fs_offset_abs),
+            "Absolute filesystem offset",
+        );
+
+        let fs_size = match &fs_header.hash_data {
+            HashData::HierarchicalSha256(hash) => {
+                tracing::trace!(?hash, "Hierarchical SHA-256 hash data");
+                // for SHA-256 hashes, we get the size from the first (actually second)
+                // level of the hash data
+                hash.layer_regions[0].size
+            }
+            HashData::HierarchicalIntegrity(hash) => {
+                tracing::trace!(?hash, "Hierarchical Integrity hash data");
+                // for Integrity hashes, we get the size from the last level
+                hash.info_level_hash.levels.last().unwrap().size
+            }
+        };
 
         match fs_header.encryption_type {
             EncryptionType::None => {
-                let fs_size = (fs_header.hash_data.get_layer_count() as u64
-                    * fs_header.hash_data.get_block_size(0).unwrap() as u64)
-                    * 0x200;
-                let fs_end_offset = fs_start_offset + fs_size;
+                tracing::trace!("No encryption detected");
 
-                tracing::trace!(
-                    layer_count = fs_header.hash_data.get_layer_count(),
-                    block_size = format!("0x{:X}", fs_header.hash_data.get_block_size(0).unwrap()),
-                    total_size = format!("0x{:X}", fs_size),
-                    end_offset = format!("0x{:X}", fs_end_offset),
-                    "Using unencrypted access method"
-                );
+                // Seek to the filesystem start offset
+                let reader = std::io::BufReader::new(self.reader.by_ref());
 
-                let shared = SharedReader::new(self.reader.by_ref());
-                let mut reader = shared.sub_file(fs_start_offset, fs_end_offset);
+                let subfile = SubFile::new(reader, fs_offset_abs, fs_offset_abs + fs_size);
 
-                // Read and log the magic bytes for debugging
-                let mut magic = [0u8; 4];
-                reader.seek(std::io::SeekFrom::Start(0))?;
-                reader.read_exact(&mut magic)?;
-
-                tracing::trace!(
-                    magic_bytes = %hex::encode(&magic),
-                    magic_str = %String::from_utf8_lossy(&magic),
-                    "Magic bytes found"
-                );
-
-                reader.seek(std::io::SeekFrom::Start(0))?;
-
-                let boxed_reader: Box<dyn ReadSeek + '_> = Box::new(reader);
-                Pfs0::new(boxed_reader)
+                // Box the reader
+                Ok(Box::new(subfile))
             }
             EncryptionType::AesCtr => {
                 tracing::trace!("Using AES-CTR decryption");
 
-                // Get the proper decryption key from our key area
+                // Get the proper decryption key
                 let decrypt_key = self.get_aes_ctr_decrypt_key()?.to_vec();
                 tracing::trace!(decrypt_key = %hex::encode(&decrypt_key), "Decryption key obtained");
 
-                // Determine the PFS0 data offset - use direct field as CNTX does
-                let pfs0_offset = match &fs_header.hash_data {
-                    HashData::HierarchicalSha256Hash { pfs0_offset, .. } => {
-                        tracing::trace!(
-                            pfs0_offset = format!("0x{:X}", pfs0_offset),
-                            "Using HierarchicalSha256Hash offset"
-                        );
-                        fs_start_offset + pfs0_offset
-                    }
-                    HashData::HierarchicalIntegrity {
-                        info_level_hash, ..
-                    } => {
-                        // For integrity hash, use the last level's offset as the PFS0 data start
-                        if let Some(last_level) = info_level_hash.levels.last() {
-                            tracing::trace!(
-                                last_level_offset = format!("0x{:X}", last_level.offset),
-                                "Using last level offset"
-                            );
-                            fs_start_offset + last_level.offset
-                        } else {
-                            tracing::trace!("No levels found in HierarchicalIntegrity");
-                            fs_start_offset
-                        }
-                    }
-                };
-
                 tracing::trace!(
-                    abs_pfs0_offset = format!("0x{:X}", pfs0_offset),
-                    "Final PFS0 absolute offset"
+                    abs_fs_offset = format!("0x{:X}", fs_offset_abs),
+                    "Final filesystem absolute offset",
                 );
 
                 // Create a reader for the NCA file
                 let reader = std::io::BufReader::new(self.reader.by_ref());
 
-                // Create the AES-CTR reader using our properly decrypted key
-                let mut aes_reader =
-                    Aes128CtrReader::new(reader, pfs0_offset, fs_header.ctr, decrypt_key);
-
-                // Read and verify the magic bytes
-                let mut magic = [0u8; 4];
-                aes_reader.seek(std::io::SeekFrom::Start(0))?;
-                aes_reader.read_exact(&mut magic)?;
-
-                tracing::trace!(
-                    magic_bytes = %hex::encode(magic),
-                    magic_str = %String::from_utf8_lossy(&magic),
-                    "Decrypted magic bytes"
-                );
-
-                // Read the first 32 bytes to compare with CNTX's output
-                aes_reader.seek(std::io::SeekFrom::Start(0))?;
-                let mut first_bytes = [0u8; 32];
-                aes_reader.read_exact(&mut first_bytes)?;
-                tracing::trace!(first_bytes = %hex::encode(first_bytes), "First 32 bytes of decrypted data");
-
-                // Reset position to beginning
-                aes_reader.seek(std::io::SeekFrom::Start(0))?;
+                // Create the AES-CTR reader using our decrypted key
+                let aes_reader =
+                    Aes128CtrReader::new(reader, fs_offset_abs, fs_header.ctr, decrypt_key);
 
                 // Box the reader
-                let boxed_reader: Box<dyn ReadSeek + '_> = Box::new(aes_reader);
-
-                tracing::trace!("Attempting to open PFS0");
-                match Pfs0::new(boxed_reader) {
-                    Ok(pfs0) => {
-                        // List the files if available
-                        if let Ok(files) = pfs0.list_files() {
-                            tracing::trace!(files = ?files, "PFS0 opened successfully");
-                        } else {
-                            tracing::trace!("PFS0 opened successfully but file listing failed");
-                        }
-                        Ok(pfs0)
-                    }
-                    Err(e) => {
-                        tracing::trace!(error = %e, "Failed to open PFS0");
-                        Err(e)
-                    }
-                }
+                Ok(Box::new(aes_reader))
             }
             _ => {
                 tracing::trace!(encryption_type = ?fs_header.encryption_type, "Unsupported encryption type");
-                Err("Unsupported encryption type".into())
+                Err(format!(
+                    "Unsupported encryption type: {:?}",
+                    fs_header.encryption_type
+                )
+                .into())
             }
         }
+    }
+
+    #[instrument(level = "trace", skip(self))]
+    pub fn open_pfs0_filesystem(
+        &mut self,
+        idx: usize,
+    ) -> Result<Pfs0<Box<dyn ReadSeek + '_>>, Box<dyn std::error::Error>> {
+        // Prepare a reader for the PFS0 filesystem
+        let mut reader = self.prepare_fs_reader(idx)?;
+
+        // Read and log the magic bytes for debugging
+        let mut magic = [0u8; 4];
+        reader.seek(std::io::SeekFrom::Start(0))?;
+        reader.read_exact(&mut magic)?;
+
+        tracing::trace!(
+            magic_bytes = %hex::encode(magic),
+            magic_str = %String::from_utf8_lossy(&magic),
+            "PFS0 magic bytes"
+        );
+
+        // Reset position to beginning
+        reader.seek(std::io::SeekFrom::Start(0))?;
+
+        // Attempt to open the PFS0
+        tracing::trace!("Attempting to open PFS0");
+        match Pfs0::new(reader) {
+            Ok(pfs0) => {
+                // List the files if available
+                if let Ok(files) = pfs0.list_files() {
+                    tracing::trace!(files = ?files, "PFS0 opened successfully");
+                } else {
+                    tracing::trace!("PFS0 opened successfully but file listing failed");
+                }
+                Ok(pfs0)
+            }
+            Err(e) => {
+                tracing::trace!(error = %e, "Failed to open PFS0");
+                Err(e)
+            }
+        }
+    }
+
+    #[instrument(level = "trace", skip(self))]
+    pub fn open_romfs_filesystem(
+        &mut self,
+        idx: usize,
+    ) -> Result<RomFs<Box<dyn ReadSeek + '_>>, Box<dyn std::error::Error>> {
+        tracing::trace!(idx, "Opening RomFS filesystem");
+
+        // Let's do some checks first to make sure we can open the RomFS
+        if idx >= self.fs_headers.len() {
+            return Err("Invalid filesystem index".into());
+        }
+
+        let fs_header = &self.fs_headers[idx];
+        if fs_header.fs_type != FsType::RomFs {
+            return Err(format!("Invalid filesystem type: {:?}", fs_header.fs_type).into());
+        }
+
+        // Prepare a reader for the RomFS filesystem
+        let mut reader = self.prepare_fs_reader(idx)?;
+
+        // Attempt to open the RomFS
+        tracing::trace!("Attempting to open RomFS");
+
+        match RomFs::new(reader) {
+            Ok(mut romfs) => {
+                // List the files if available
+                if let Ok(files) = romfs.list_files() {
+                    tracing::trace!(files = ?files, "RomFS opened successfully");
+                } else {
+                    tracing::trace!("RomFS opened successfully but file listing failed");
+                }
+                Ok(romfs)
+            }
+            Err(e) => {
+                tracing::trace!(error = %e, "Failed to open RomFS");
+                Err(e)
+            }
+        }
+    }
+    pub fn decrypt_and_dump_fs(
+        &mut self,
+        idx: usize,
+    ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        tracing::trace!("Decrypting and dumping filesystem {}", idx);
+        let mut reader = self.prepare_fs_reader(idx)?;
+        let mut buffer = Vec::new();
+
+        // read the first 100
+        for _ in 0..100 {
+            let mut buf = [0u8; 1];
+            reader.read_exact(&mut buf)?;
+            buffer.push(buf[0]);
+        }
+        Ok(buffer)
     }
 }
 
@@ -762,70 +819,99 @@ mod tests {
     use super::*;
     use tracing_test::traced_test;
     use xts_mode::get_tweak_default;
-    #[test]
-    // #[instrument]
-    #[traced_test]
-    pub fn decrypt_nca_header() -> color_eyre::Result<()> {
-        let keyset = match Keyset::from_file("prod.keys") {
-            Ok(k) => k,
-            Err(e) => {
-                tracing::warn!("Could not load keyset, skipping test: {}", e);
-                return Ok(());
-            }
-        };
 
-        let file_path =
-            std::path::Path::new("test/Browser/cf03cf6a80796869775f77e0c61e136e.cnmt.nca");
+    pub fn test_nca_file(path: &str) -> color_eyre::Result<()> {
+        let keyset = Keyset::from_file("prod.keys")?;
+        let file_path = std::path::Path::new(path);
         let nca_file = std::fs::File::open(file_path)?;
 
         let filename = file_path.file_name().unwrap().to_str().unwrap();
         tracing::trace!("Decrypting NCA: {}", filename);
 
         let reader = std::io::BufReader::new(nca_file);
-
-        // Pass None for title_key as this is probably a metadata NCA without encryption
         let mut nca = Nca::from_reader(reader, &keyset, None).unwrap();
 
-        // tracing::trace!("{:?}", nca.header);
+        tracing::trace!("{:?}", nca.header);
 
-        // for (i, fs_header) in nca.fs_headers.iter().enumerate() {
-        //     tracing::trace!("Filesystem {}: {:0?}", i, fs_header);
-        // }
+        for (i, fs_header) in nca.fs_headers.iter().enumerate() {
+            tracing::trace!("Filesystem {}: {:0?}", i, fs_header);
+        }
 
         tracing::trace!("Total valid filesystems: {}", nca.filesystem_count());
 
-        // Clone the file path here to avoid borrow issues
-        let file_path_clone = file_path.to_path_buf();
-
-        // Add a hexdump of the first few bytes to debug the issue
-        // Iterate over all filesystems in the NCA
         for fs_idx in 0..nca.filesystem_count() {
             tracing::trace!("Trying filesystem {}", fs_idx);
             let fs_offset = nca.get_fs_offset(fs_idx);
-            let pfs0_result = nca.open_pfs0_filesystem(fs_idx);
+            tracing::trace!("Filesystem type: {:?}", nca.fs_headers[fs_idx].fs_type);
 
-            match pfs0_result {
-                Ok(pfs0) => {
-                    tracing::trace!("PFS0 #{} opened successfully!", fs_idx);
-                    if let Ok(files) = pfs0.list_files() {
-                        tracing::trace!("Files in PFS0 #{}: {:?}", fs_idx, files);
+            match nca.fs_headers[fs_idx].fs_type {
+                FsType::RomFs => {
+                    let romfs_result = nca.open_romfs_filesystem(fs_idx);
+
+                    match romfs_result {
+                        Ok(mut romfs) => {
+                            tracing::trace!("RomFS #{} opened successfully!", fs_idx);
+                            // tracing::trace!("Files in RomFS #{}: {:?}", fs_idx, romfs);
+                            if let Ok(files) = romfs.list_files() {
+                                tracing::trace!("Files in RomFS #{}: {:?}", fs_idx, files);
+                            }
+                        }
+                        Err(e) => {
+                            tracing::trace!("Failed to open RomFS #{}: {}", fs_idx, e);
+                            // For further debugging, you could try reading raw bytes from the offset
+                        }
                     }
                 }
-                Err(e) => {
-                    tracing::trace!("Failed to open PFS0 #{}: {}", fs_idx, e);
-                    // For further debugging, you could try reading raw bytes from the offset
-                    if let Some(fs_offset) = fs_offset {
-                        tracing::trace!("Dumping raw bytes from offset 0x{:X}", fs_offset);
-                        let mut raw_reader = std::fs::File::open(&file_path_clone)?;
-                        raw_reader.seek(std::io::SeekFrom::Start(fs_offset))?;
-                        let mut buf = [0u8; 0x100];
-                        raw_reader.read_exact(&mut buf)?;
-                        tracing::trace!("Raw bytes: {}", hex::encode(&buf[..16]));
+
+                FsType::PartitionFs => {
+                    let pfs0_result = nca.open_pfs0_filesystem(fs_idx);
+
+                    match pfs0_result {
+                        Ok(pfs0) => {
+                            tracing::trace!("PFS0 #{} opened successfully!", fs_idx);
+                            if let Ok(files) = pfs0.list_files() {
+                                tracing::trace!("Files in PFS0 #{}: {:?}", fs_idx, files);
+                            }
+                        }
+                        Err(e) => {
+                            tracing::trace!("Failed to open PFS0 #{}: {}", fs_idx, e);
+                            // For further debugging, you could try reading raw bytes from the offset
+                            if let Some(fs_offset) = fs_offset {
+                                tracing::trace!("Dumping raw bytes from offset 0x{:X}", fs_offset);
+                                let mut raw_reader = std::fs::File::open(file_path)?;
+                                raw_reader.seek(std::io::SeekFrom::Start(fs_offset))?;
+                                let mut buf = [0u8; 0x100];
+                                raw_reader.read_exact(&mut buf)?;
+                                tracing::trace!("Raw bytes: {}", hex::encode(&buf[..16]));
+                            }
+                        }
                     }
                 }
             }
         }
 
+        // nca.decrypt_and_dump_fs(0).unwrap();
+        Ok(())
+    }
+
+    #[test]
+    // #[instrument]
+    #[traced_test]
+    pub fn cnmt_nca_sanity_test() -> color_eyre::Result<()> {
+        let file_path =
+            std::path::Path::new("test/Browser/cf03cf6a80796869775f77e0c61e136e.cnmt.nca");
+
+        test_nca_file(file_path.to_str().unwrap())?;
+
+        Ok(())
+    }
+
+    #[test]
+    #[traced_test]
+    pub fn test_nca() -> color_eyre::Result<()> {
+        let file_path = std::path::Path::new("test/Browser/2b9b99ea58139c320c82055c337135df.nca");
+
+        test_nca_file(file_path.to_str().unwrap())?;
         Ok(())
     }
 

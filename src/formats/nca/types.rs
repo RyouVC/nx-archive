@@ -1,4 +1,6 @@
-use binrw::prelude::*;
+use std::io::{Read, Seek, SeekFrom};
+
+use binrw::{Endian, prelude::*};
 
 #[binrw]
 #[brw(little)]
@@ -158,90 +160,54 @@ pub enum MetaDataHashType {
 #[binrw]
 #[brw(little)]
 #[derive(Debug, PartialEq, Eq)]
-pub enum HashData {
-    // We don't want to actually pre-assert this since binrw
-    // looks for the magic byte at the start of the struct, and we know
-    // that IVFC is the only variant that starts with that magic byte.
-    // #[br(pre_assert(hash_type == HashType::HierarchicalSha256Hash))]
-    HierarchicalSha256Hash {
-        #[brw(pad_size_to = 0x20)]
-        master_hash: [u8; 0x20],
-        #[brw(pad_size_to = 0x4)]
-        hash_block_size: u32,
-        #[brw(pad_size_to = 0x4)]
-        layer_count: u32,
-        // Add hash table offset and pfs0 offset fields to match CNTX
-        #[brw(pad_size_to = 0x8)]
-        hash_table_offset: u64,
-        #[brw(pad_size_to = 0x8)]
-        hash_table_size: u64,
-        #[brw(pad_size_to = 0x8)]
-        pfs0_offset: u64,
-        #[brw(pad_size_to = 0x8)]
-        pfs0_size: u64,
-        // Remaining layer regions and reserved fields
-        #[brw(pad_size_to = 0x20)]
-        #[br(count = 0x20)]
-        _reserved1: Vec<u8>,
-        #[brw(pad_size_to = 0x20)]
-        #[br(count = 0x20)]
-        _reserved2: Vec<u8>,
-        #[brw(pad_size_to = 0x20)]
-        #[br(count = 0x20)]
-        _reserved3: Vec<u8>,
-        #[brw(pad_size_to = 0x10)]
-        #[br(count = 0x10)]
-        _reserved4: Vec<u8>,
-    },
-    // #[br(pre_assert(hash_type == HashType::HierarchicalIntegrityHash))]
-    #[br(magic = b"IVFC")]
-    HierarchicalIntegrity {
-        version: u32,
-        #[brw(pad_size_to = 0x4)]
-        master_hash_size: u32,
-        #[brw(pad_size_to = 0xB4)]
-        info_level_hash: InfoLevelHash,
-        #[brw(pad_size_to = 0x20)]
-        master_hash: [u8; 0x20],
-        #[brw(pad_size_to = 0x18)]
-        #[br(count = 0x18)]
-        _reserved: Vec<u8>,
-    },
+pub struct LayerRegion {
+    pub offset: u64,
+    pub size: u64,
 }
 
-impl HashData {
-    /// Get the number of layers in the hash data
-    pub fn get_layer_count(&self) -> u32 {
-        match self {
-            HashData::HierarchicalSha256Hash { layer_count, .. } => *layer_count,
-            HashData::HierarchicalIntegrity {
-                info_level_hash, ..
-            } => info_level_hash.max_layers,
-        }
-    }
+#[binrw]
+#[brw(little)]
+#[derive(Debug, PartialEq, Eq)]
+pub struct HierarchicalSha256Data {
+    // 0x00
+    // MasterHash (SHA256 hash over the hash-table at section-start+0 with the below hash-table size)
+    pub master_hash: [u8; 0x20],
+    // 0x4, now we're at 0x20
+    pub hash_block_size: u32,
+    // 0x24
+    // previously unknown field
+    pub layer_count: u32,
 
-    /// Get the block size for a specific layer
-    /// For HierarchicalSha256Hash, layer index is ignored since all layers use the same block size
-    /// For HierarchicalIntegrity, returns the block size for the specified layer
-    /// Returns None if the layer index is out of bounds
-    pub fn get_block_size(&self, layer_index: usize) -> Option<u32> {
-        match self {
-            HashData::HierarchicalSha256Hash {
-                hash_block_size, ..
-            } => Some(*hash_block_size),
-            HashData::HierarchicalIntegrity {
-                info_level_hash, ..
-            } => {
-                if layer_index < info_level_hash.levels.len() {
-                    // The block size is stored as log2, so we need to calculate 2^block_size_log2
-                    let block_size_log2 = info_level_hash.levels[layer_index].block_size_log2;
-                    Some(1 << block_size_log2)
-                } else {
-                    None
-                }
-            }
-        }
-    }
+    // We're going to split the layer regions into 2 separate fields.
+    // Originally, this would be a 0x50 buffer of 5 LayerRegions,
+    // but since the first region is guaranteed to be the hash table,
+    // we'll use a separate field for that.
+    pub hash_table_region: LayerRegion,
+    #[brw(pad_size_to = 0x40)] // minus 0x10 for the hash table region
+    #[br(count = 4)]
+    pub layer_regions: Vec<LayerRegion>,
+    // #[brw(pad_size_to = 0x80)]
+    pub _reserved: [u8; 0x80],
+}
+
+#[binrw]
+#[brw(little)]
+#[derive(Debug, PartialEq, Eq)]
+#[br(magic = b"IVFC")] // We have skipped 0x4 bytes by checking this magic
+pub struct IntegrityMetaInfo {
+    pub version: u32,
+    pub master_hash_size: u32,
+    pub info_level_hash: InfoLevelHash,
+}
+#[binrw]
+#[brw(little)]
+#[derive(Debug, PartialEq, Eq)]
+#[br(import(hash_type: HashType))]
+pub enum HashData {
+    #[br(pre_assert(hash_type == HashType::HierarchicalSha256Hash))]
+    HierarchicalSha256(HierarchicalSha256Data),
+    #[br(pre_assert(hash_type == HashType::HierarchicalIntegrityHash))]
+    HierarchicalIntegrity(IntegrityMetaInfo),
 }
 
 #[binrw]
@@ -250,21 +216,43 @@ impl HashData {
 pub struct InfoLevelHash {
     pub max_layers: u32,
     #[brw(pad_size_to = 0x90)]
-    #[br(count = max_layers)]
+    #[br(count = 6)]
     pub levels: Vec<HierarchicalIntegrityLevelInfo>,
     #[brw(pad_size_to = 0x20)]
     pub signature_salt: [u8; 0x20],
 }
 
+impl InfoLevelHash {
+    /// Get the number of layers in the hash data
+    pub fn get_layer_count(&self) -> u32 {
+        self.max_layers
+    }
+
+    /// Get the block size for a specific layer
+    /// Returns None if the layer index is out of bounds
+    pub fn get_block_size(&self, layer_index: usize) -> Option<u32> {
+        if layer_index < self.levels.len() {
+            // The block size is stored as log2, so we need to calculate 2^block_size_log2
+            let block_size_log2 = self.levels[layer_index].block_size_log2;
+            Some(1 << block_size_log2)
+        } else {
+            None
+        }
+    }
+
+    pub fn get_last_layer(&self) -> Option<&HierarchicalIntegrityLevelInfo> {
+        self.levels.last()
+    }
+}
+
 #[binrw]
 #[brw(little)]
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub struct HierarchicalIntegrityLevelInfo {
-    pub offset: u64,
+    pub logical_offset: u64,
     pub size: u64,
     pub block_size_log2: u32,
-    #[brw(pad_size_to = 0x4)]
-    pub _reserved: [u8; 0x4],
+    pub _reserved: u32,
 }
 
 #[binrw]
@@ -288,6 +276,7 @@ pub struct FsHeader {
     pub metadata_hash_type: MetaDataHashType,
     _reserved: [u8; 0x2],
     #[brw(pad_size_to = 0xF8)]
+    #[br(args(hash_type))] // pass the hash type to the HashData enum to determine the variant
     pub hash_data: HashData,
     #[br(count = 0x40)]
     #[brw(pad_size_to = 0x40)]
