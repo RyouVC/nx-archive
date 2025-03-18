@@ -181,23 +181,22 @@ pub struct NcaHeader {
     // So, the version number is the 4th byte, and is a char.
     /// NCA Version, extracted from the last byte of the magic number.
     pub nca_version: NcaVersion,
+    /// Distribution type
     pub distribution: DistributionType,
+    /// Content type
     pub content_type: ContentType,
+    /// key_generation_old
     pub key_generation_old: KeyGenerationOld,
     pub key_area_appkey_index: KeyAreaEncryptionKeyIndex,
     pub content_size: u64,
     pub program_id: u64,
     pub content_index: u32,
     pub sdk_version: u32,
-    pub key_generation: u8,
+    pub key_generation: KeyGeneration,
     pub signature_key_generation: u8,
-    // 0xe
-    #[br(count = 0xE)]
-    #[brw(pad_size_to = 0xE)]
-    _reserved: Vec<u8>,
-    #[br(count = 0x10)]
-    #[brw(pad_size_to = 0x10)]
-    pub rights_id: Vec<u8>,
+    // 0xE
+    pub _reserved_e: [u8; 0xE],
+    pub rights_id: [u8; 0x10],
     #[br(count = 4)]
     #[brw(pad_size_to = 0x10 * 4)]
     pub fs_entries: Vec<FsEntry>,
@@ -276,7 +275,7 @@ impl NcaHeader {
     /// Get the key generation to use (accounting for old key_generation field)
     pub fn get_key_generation(&self) -> u8 {
         let key_gen_old = self.key_generation_old as u8;
-        let key_gen = self.key_generation;
+        let key_gen = self.key_generation as u8;
 
         // Use the higher of the two key generation values
         let base_key_gen = if key_gen_old < key_gen {
@@ -353,7 +352,7 @@ impl<R: Read + Seek> Nca<R> {
             nca_version = %header.nca_version.as_char(),
             content_type = ?header.content_type,
             key_generation_old = ?header.key_generation_old,
-            key_generation = %header.key_generation,
+            key_generation = ?header.key_generation,
             key_area_appkey_index = ?header.key_area_appkey_index,
             "NCA header decoded"
         );
@@ -393,6 +392,7 @@ impl<R: Read + Seek> Nca<R> {
         let dec_title_key = if !header.rights_id.iter().all(|&b| b == 0) {
             // If we have rights ID, try to get the title key
             let rights_id_hex = hex::encode(&header.rights_id).to_uppercase();
+            tracing::trace!(rights_id = %rights_id_hex, "NCA requires title key");
 
             // Get the key generation
             let key_gen = header.get_key_generation();
@@ -567,7 +567,7 @@ impl<R: Read + Seek> Nca<R> {
     /// Get the key generation to use (accounting for old key_generation field)
     pub fn get_key_generation(&self) -> u8 {
         let key_gen_old = self.header.key_generation_old as u8;
-        let key_gen = self.header.key_generation;
+        let key_gen = self.header.key_generation as u8;
 
         // Use the higher of the two key generation values
         let base_key_gen = if key_gen_old < key_gen {
@@ -577,7 +577,7 @@ impl<R: Read + Seek> Nca<R> {
         };
 
         // Both 0 and 1 are master key 0
-        if base_key_gen > 0 {
+        if base_key_gen > 1 {
             base_key_gen - 1
         } else {
             base_key_gen
@@ -828,8 +828,10 @@ mod tests {
         let filename = file_path.file_name().unwrap().to_str().unwrap();
         tracing::trace!("Decrypting NCA: {}", filename);
 
+        let title_keys = TitleKeys::load_from_file("/home/cappy/.switch/title.keys")?;
+
         let reader = std::io::BufReader::new(nca_file);
-        let mut nca = Nca::from_reader(reader, &keyset, None).unwrap();
+        let mut nca = Nca::from_reader(reader, &keyset, Some(&title_keys)).unwrap();
 
         tracing::trace!("{:?}", nca.header);
 
@@ -931,7 +933,7 @@ mod tests {
     #[test]
     #[traced_test]
     pub fn test_nca() -> color_eyre::Result<()> {
-        let file_path = std::path::Path::new("test/Browser/2b9b99ea58139c320c82055c337135df.nca");
+        let file_path = std::path::Path::new("dump/smb_wonder_update.cnmt.nca");
 
         test_nca_file(file_path.to_str().unwrap())?;
         Ok(())
@@ -991,10 +993,10 @@ mod tests {
             program_id: 0,
             content_index: 0,
             sdk_version: 0,
-            key_generation: 0,
+            key_generation: KeyGeneration::Gen1_0_0,
             signature_key_generation: 0,
-            _reserved: vec![0; 0xE],
-            rights_id: vec![0; 0x10],
+            _reserved_e: [0; 0xE],
+            rights_id: [0; 0x10],
             fs_entries: vec![],
             sha256_hashes: vec![],
             encrypted_keys: KeyArea::default(),

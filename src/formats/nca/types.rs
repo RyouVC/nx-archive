@@ -52,28 +52,42 @@ pub enum KeyGeneration {
     Unused = 0x01,
     /// 3.0.0 key generation
     Gen3_0_0 = 0x02,
+    /// 3.0.1 key generation
+    Gen3_0_1 = 0x03,
     /// 4.0.0 key generation
-    Gen4_0_0 = 0x03,
+    Gen4_0_0 = 0x04,
     /// 5.0.0 key generation
-    Gen5_0_0 = 0x04,
+    Gen5_0_0 = 0x05,
     /// 6.0.0 key generation
-    Gen6_0_0 = 0x05,
+    Gen6_0_0 = 0x06,
     /// 6.2.0 key generation
-    Gen6_2_0 = 0x06,
+    Gen6_2_0 = 0x07,
     /// 7.0.0 key generation
-    Gen7_0_0 = 0x07,
+    Gen7_0_0 = 0x08,
     /// 8.1.0 key generation
-    Gen8_1_0 = 0x08,
+    Gen8_1_0 = 0x09,
     /// 9.0.0 key generation
-    Gen9_0_0 = 0x09,
+    Gen9_0_0 = 0x0A,
     /// 9.1.0 key generation
-    Gen9_1_0 = 0x0A,
+    Gen9_1_0 = 0x0B,
     /// 12.1.0 key generation
-    Gen12_1_0 = 0x0B,
+    Gen12_1_0 = 0x0C,
     /// 13.0.0 key generation
-    Gen13_0_0 = 0x0C,
+    Gen13_0_0 = 0x0D,
     /// 14.0.0 key generation
-    Gen14_0_0 = 0x0D,
+    Gen14_0_0 = 0x0E,
+    /// 15.0.0 key generation
+    Gen15_0_0 = 0x0F,
+    /// 16.0.0 key generation
+    Gen16_0_0 = 0x10,
+    /// 17.0.0 key generation
+    Gen17_0_0 = 0x11,
+    /// 18.0.0 key generation
+    Gen18_0_0 = 0x12,
+    /// 19.0.0 key generation
+    Gen19_0_0 = 0x13,
+    /// Invalid key generation
+    Invalid = 0xFF,
 }
 
 /// Alias for backward compatibility
