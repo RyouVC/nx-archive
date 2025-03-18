@@ -715,7 +715,7 @@ impl<R: Read + Seek> Nca<R> {
                 aes_reader.read_exact(&mut magic)?;
 
                 tracing::trace!(
-                    magic_bytes = %hex::encode(&magic),
+                    magic_bytes = %hex::encode(magic),
                     magic_str = %String::from_utf8_lossy(&magic),
                     "Decrypted magic bytes"
                 );
@@ -724,7 +724,7 @@ impl<R: Read + Seek> Nca<R> {
                 aes_reader.seek(std::io::SeekFrom::Start(0))?;
                 let mut first_bytes = [0u8; 32];
                 aes_reader.read_exact(&mut first_bytes)?;
-                tracing::trace!(first_bytes = %hex::encode(&first_bytes), "First 32 bytes of decrypted data");
+                tracing::trace!(first_bytes = %hex::encode(first_bytes), "First 32 bytes of decrypted data");
 
                 // Reset position to beginning
                 aes_reader.seek(std::io::SeekFrom::Start(0))?;
