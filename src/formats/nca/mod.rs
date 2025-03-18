@@ -775,7 +775,7 @@ impl<R: Read + Seek> Nca<R> {
         }
 
         // Prepare a reader for the RomFS filesystem
-        let mut reader = self.prepare_fs_reader(idx)?;
+        let reader = self.prepare_fs_reader(idx)?;
 
         // Attempt to open the RomFS
         tracing::trace!("Attempting to open RomFS");
@@ -884,6 +884,11 @@ mod tests {
                                 raw_reader.read_exact(&mut buf)?;
                                 tracing::trace!("Raw bytes: {}", hex::encode(&buf[..16]));
                             }
+
+                            // Log the error and continue instead of unwrapping
+                            tracing::error!("PFS0 error: {}", e);
+
+                            panic!("Failed to open PFS0: {}", e);
                         }
                     }
                 }
@@ -902,6 +907,23 @@ mod tests {
             std::path::Path::new("test/Browser/cf03cf6a80796869775f77e0c61e136e.cnmt.nca");
 
         test_nca_file(file_path.to_str().unwrap())?;
+
+        Ok(())
+    }
+
+    #[test]
+    #[traced_test]
+    pub fn test_multiple_files() -> color_eyre::Result<()> {
+        let file_path = std::path::Path::new("test/Browser");
+
+        for entry in std::fs::read_dir(file_path)? {
+            let entry = entry?;
+            let path = entry.path();
+            let path_str = path.to_str().unwrap();
+            if path_str.ends_with(".nca") {
+                test_nca_file(path_str)?;
+            }
+        }
 
         Ok(())
     }
