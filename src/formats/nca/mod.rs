@@ -65,7 +65,7 @@ pub fn encrypt_with_header_key(
     let mut encrypted = data.to_vec();
     let xts = keyset.header_crypt();
 
-    xts.encrypt_area(
+    xts.unwrap().encrypt_area(
         &mut encrypted,
         sector_size,
         first_sector_index,
@@ -85,12 +85,17 @@ pub fn decrypt_with_header_key(
     let mut decrypted = data.to_vec();
     let xts = keyset.header_crypt();
 
-    xts.decrypt_area(
-        &mut decrypted,
-        sector_size,
-        first_sector_index,
-        get_nintendo_tweak,
-    );
+    if let Some(xts) = xts {
+        xts.decrypt_area(
+            &mut decrypted,
+            sector_size,
+            first_sector_index,
+            get_nintendo_tweak,
+        );
+    } else {
+        // Handle the case where xts is None
+        panic!("Failed to get header crypt");
+    }
 
     decrypted
 }
@@ -254,7 +259,7 @@ impl NcaHeader {
         let first_sector_index = 0;
         let encrypted_portion = &mut encrypted[..0xC00];
 
-        xts.encrypt_area(
+        xts.unwrap().encrypt_area(
             encrypted_portion,
             sector_size,
             first_sector_index,
@@ -391,7 +396,7 @@ impl<R: Read + Seek> Nca<R> {
         // Process key decryption based on rights ID
         let dec_title_key = if !header.rights_id.iter().all(|&b| b == 0) {
             // If we have rights ID, try to get the title key
-            let rights_id_hex = hex::encode(&header.rights_id).to_uppercase();
+            let rights_id_hex = hex::encode(header.rights_id).to_uppercase();
             tracing::trace!(rights_id = %rights_id_hex, "NCA requires title key");
 
             // Get the key generation
@@ -400,9 +405,18 @@ impl<R: Read + Seek> Nca<R> {
             // First check if we have title keys database
             if let Some(title_keys_db) = title_keys {
                 // Get the title KEK for this key generation
-                if let Some(title_kek) = keyset.get_title_kek(key_gen as usize) {
+                let title_kek = keyset.get_title_kek(key_gen as usize);
+                tracing::trace!(
+                    key_gen = %key_gen,
+                    title_kek = ?title_kek,
+                    "Title KEK obtained"
+                );
+
+                // Try to decrypt the title key
+
+                if let Some(title_kek) = title_kek {
                     // Try to decrypt the title key
-                    match title_keys_db.decrypt_title_key(&rights_id_hex, title_kek) {
+                    match title_keys_db.decrypt_title_key(&rights_id_hex, &title_kek) {
                         Ok(dec_key) => Some(dec_key),
                         Err(e) => {
                             tracing::warn!("Failed to decrypt title key: {}", e);
@@ -426,22 +440,26 @@ impl<R: Read + Seek> Nca<R> {
             }
         } else {
             // If no rights ID, decrypt key area
+            tracing::trace!("NCA does not require title key, attempting to get key area key");
             let key_gen = header.get_key_generation();
 
             // Get the appropriate key area key based on index
             let key_area_key = match header.key_area_appkey_index {
                 KeyAreaEncryptionKeyIndex::Application => {
                     let key = keyset.get_key_area_key_application(key_gen as usize);
-                    key.map(|k| k.as_slice())
+                    tracing::trace!(key_gen = %key_gen, key_type = "Application", key = ?key, "Key area key obtained");
+                    key.map(|k| k.clone())
                 }
                 KeyAreaEncryptionKeyIndex::Ocean => {
                     let key = keyset.get_key_area_key_ocean(key_gen as usize);
-                    key.map(|k| k.as_slice())
+                    tracing::trace!(key_gen = %key_gen, key_type = "Ocean", key = ?key, "Key area key obtained");
+                    key.map(|k| k.clone())
                 }
                 KeyAreaEncryptionKeyIndex::System => {
                     let key = keyset.get_key_area_key_system(key_gen as usize);
-                    key.map(|k| k.as_slice())
-                } // _ => None,
+                    tracing::trace!(key_gen = %key_gen, key_type = "System", key = ?key, "Key area key obtained");
+                    key.map(|k| k.clone())
+                }
             };
 
             // If we have a key, decrypt the key area
@@ -462,7 +480,7 @@ impl<R: Read + Seek> Nca<R> {
                 type Aes128EcbDec = ecb::Decryptor<aes::Aes128>;
 
                 // Create an ECB decryptor with our key and no padding
-                let mut decryptor = Aes128EcbDec::new_from_slice(key)
+                let mut decryptor = Aes128EcbDec::new_from_slice(&key)
                     .map_err(|_| "Failed to create ECB decryptor")?;
 
                 // Decrypt the key area in-place
@@ -477,12 +495,8 @@ impl<R: Read + Seek> Nca<R> {
 
                 dec_key_area = key_area_copy;
 
-                // Debug comparison with CNTX's key
-                let debug_key = [0x04; 0x10];
                 tracing::trace!(
                     decrypted_key = %hex::encode(dec_key_area.aes_ctr_key),
-                    debug_key = %hex::encode(debug_key),
-                    matches_debug = dec_key_area.aes_ctr_key == debug_key,
                     "Key area decrypted"
                 );
             } else {
@@ -588,19 +602,43 @@ impl<R: Read + Seek> Nca<R> {
     /// Otherwise, it uses the decrypted key area key
     #[inline]
     pub fn get_aes_ctr_decrypt_key(&self) -> Result<[u8; 0x10], Box<dyn std::error::Error>> {
-        if !self.key_status {
-            return Err("NCA keys are not available for decryption".into());
+        if self.has_rights_id() {
+            // If title key is required, check if we have a decrypted one
+            if let Some(dec_key) = self.dec_title_key {
+                // Title key is required and available, use it
+                tracing::trace!(key = %hex::encode(dec_key), "Using decrypted title key");
+                return Ok(dec_key);
+            }
+
+            // Title key is required but not available
+            let rights_id_hex = hex::encode(self.header.rights_id).to_uppercase();
+            return Err(format!(
+                "NCA requires title key for rights ID {}, but it was not available or could not be decrypted",
+                rights_id_hex
+            ).into());
         }
 
-        if let Some(dec_key) = self.dec_title_key {
-            // Use the already-decrypted title key
-            tracing::trace!(key = %hex::encode(dec_key), "Using decrypted title key");
-            Ok(dec_key)
-        } else {
-            tracing::trace!(key = %hex::encode(self.dec_key_area.aes_ctr_key), "Using decrypted key area key");
-            // Use the properly decrypted key area's AES-CTR key
-            Ok(self.dec_key_area.aes_ctr_key)
+        // NCA doesn't require title key, use key area's AES-CTR key
+        if !self.key_status {
+            // Provide more specific error message based on the key area encryption key index and key generation
+            let key_gen = self.get_key_generation();
+            let key_type = self.header.key_area_appkey_index;
+
+            let key_name = match key_type {
+                KeyAreaEncryptionKeyIndex::Application => "key_area_key_application",
+                KeyAreaEncryptionKeyIndex::Ocean => "key_area_key_ocean",
+                KeyAreaEncryptionKeyIndex::System => "key_area_key_system",
+            };
+
+            return Err(format!(
+                "Key area could not be decrypted (missing {}_{:2x} in keys file)",
+                key_name, key_gen
+            )
+            .into());
         }
+
+        tracing::trace!(key = %hex::encode(self.dec_key_area.aes_ctr_key), "Using decrypted key area key");
+        Ok(self.dec_key_area.aes_ctr_key)
     }
 
     /// Private helper method to prepare a reader for any filesystem type
@@ -1025,7 +1063,7 @@ mod tests {
         let header = test_header();
 
         let keyset = Keyset {
-            header_key: [2; 0x20],
+            header_key_cache: Some([0; 0x20]),
             ..Default::default()
         };
 
