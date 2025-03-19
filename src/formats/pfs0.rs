@@ -15,6 +15,8 @@ use std::io::{Read, Seek, SeekFrom};
 
 use binrw::prelude::*;
 
+use crate::io::SubFile;
+
 // Type alias for NSP (Nintendo Submission Package), which are simply just
 // PFS0 images
 pub type Nsp<R> = Pfs0<R>;
@@ -172,17 +174,20 @@ impl<R: Read + Seek> Pfs0<R> {
     /// * `vpath` - The filename to extract
     ///
     /// # Returns
-    /// * `Result<Vec<u8>, Box<dyn std::error::Error>>` - The file contents or an error
+    /// * `Result<Vec<u8>, crate::error::Error>` - The file contents or an error
     ///
     /// # Notes
     /// - Files are extracted in chunks to avoid excessive memory usage
     /// - The file offset calculation accounts for the PFS0 header, entries, and string table
-    pub fn extract_file(&mut self, vpath: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-        let file = self
-            .files
-            .iter()
-            .find(|f| f.name == vpath)
-            .ok_or("File not found")?;
+    pub fn read_file(&mut self, vpath: &str) -> Result<Vec<u8>, crate::error::Error> {
+        let file =
+            self.files
+                .iter()
+                .find(|f| f.name == vpath)
+                .ok_or(crate::error::Error::NotFound(format!(
+                    "File not found: {}",
+                    vpath
+                )))?;
         let file_data_offset = file.entry.data_offset;
         let size = file.entry.data_size as usize;
 
@@ -223,9 +228,48 @@ impl<R: Read + Seek> Pfs0<R> {
         Ok(data)
     }
 
-    pub fn list_files(&self) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    pub fn return_reader_file(&mut self, vpath: &str) -> Result<SubFile<R>, crate::error::Error>
+    where
+        R: Clone,
+    {
+        let file =
+            self.files
+                .iter()
+                .find(|f| f.name == vpath)
+                .ok_or(crate::error::Error::NotFound(format!(
+                    "File not found: {}",
+                    vpath
+                )))?;
+        let file_data_offset = file.entry.data_offset;
+        let size = file.entry.data_size;
+
+        // Calculate actual file offset in the container
+        // This is: header (0x10) + all entries (0x18 * num_files) + string table size
+        let files_start_offset =
+            0x10 + (0x18 * self.header.num_files as u64) + (self.header.str_table_offset as u64);
+        let offset = files_start_offset + file_data_offset;
+
+        tracing::trace!(
+            ?vpath,
+            offset = format!("{:012X}", offset),
+            actual_offset = format!("{:012X}", offset + size as u64),
+            "Dumping included file"
+        );
+
+        // Clone the reader to provide an owned value to SubFile::new
+        let reader_clone = self.reader.clone();
+
+        Ok(SubFile::new(reader_clone, offset, offset + size))
+    }
+
+    pub fn list_files(&self) -> Result<Vec<String>, crate::error::Error> {
         let files = self.files.iter().map(|f| f.name.clone()).collect();
         Ok(files)
+    }
+
+
+    pub fn file_count(&self) -> usize {
+        self.files.len()
     }
 }
 
@@ -247,7 +291,7 @@ mod tests {
         // Use a string literal for include_bytes!
         let fixture_data =
             include_bytes!("../../test/Browser/2b9b99ea58139c320c82055c337135df.nca");
-        let data = pfs0.extract_file(vpath).unwrap();
+        let data = pfs0.read_file(vpath).unwrap();
         println!("Data length: {}", data.len());
         // write to file
         std::fs::write("test_tmp/output.nca", &data).expect("Failed to write file");

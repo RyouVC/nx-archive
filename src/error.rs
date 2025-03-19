@@ -1,3 +1,4 @@
+use cipher::InvalidLength;
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -8,6 +9,8 @@ pub enum Error {
     InvalidArgument(String),
     #[error("Invalid data: {0}")]
     InvalidData(String),
+    #[error("Unable to parse binary data: {0}")]
+    BinaryParser(#[from] binrw::Error),
     #[error("Invalid state: {0}")]
     InvalidState(String),
     #[error("Invalid format: {0}")]
@@ -24,4 +27,14 @@ pub enum Error {
     Timeout(String),
     #[error("Other error: {0}")]
     Other(String),
+    #[error("Encryption error: {0}")]
+    CryptoError(String),
+    #[error("Key Lookup error: {0}")]
+    KeyLookupError(String),
+}
+
+impl From<InvalidLength> for Error {
+    fn from(_: InvalidLength) -> Self {
+        Error::CryptoError("Invalid key length".to_string())
+    }
 }

@@ -6,10 +6,17 @@ use std::io::{Read, Seek};
 pub trait ReadSeek: Read + Seek {}
 impl<T: Read + Seek> ReadSeek for T {}
 
-use crate::{formats::cnmt::Cnmt, io::SubFile};
+use crate::{
+    formats::{Keyset, TitleKeys, cnmt::Cnmt},
+    io::SubFile,
+};
 
 pub trait TitleDataExt {
-    fn get_cnmts(&self) -> Result<Vec<Cnmt>, crate::error::Error>;
+    fn get_cnmts(
+        &mut self,
+        keyset: &Keyset,
+        title_keyset: Option<&TitleKeys>,
+    ) -> Result<Vec<Cnmt>, crate::error::Error>;
     fn title_id(&self) -> Result<u64, crate::error::Error>;
     fn title_id_serialized(&self) -> Result<String, crate::error::Error> {
         Ok(format!("{:016X}", self.title_id()?))

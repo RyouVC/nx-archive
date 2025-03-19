@@ -15,7 +15,7 @@ use binrw::prelude::*;
 use std::io::{Read, Seek, SeekFrom};
 use tracing::trace;
 
-use crate::io::SubFile;
+use crate::{FileEntryExt, TitleDataExt, io::SubFile};
 
 use super::hfs0::Hfs0;
 
@@ -416,6 +416,56 @@ impl<R: Read + Seek> Xci<R> {
     }
 }
 
+impl TitleDataExt for Xci<SubFile<std::fs::File>> {
+    fn get_cnmts(
+        &mut self,
+        keyset: &crate::formats::Keyset,
+        title_keyset: std::option::Option<&crate::formats::title_keyset::TitleKeys>,
+    ) -> Result<Vec<crate::formats::cnmt::Cnmt>, crate::error::Error> {
+        let mut cnmts = Vec::new();
+
+        let secure = self.open_secure_partition()?;
+        if let Some(mut secure) = secure {
+            let files = secure.get_files();
+            for file in files {
+                if file.name.ends_with(".cnmt.nca") {
+                    let mut buf = vec![0u8; file.size as usize];
+                    secure.read_to_buf(&file, &mut buf)?;
+                    let mut cursor = std::io::Cursor::new(buf);
+                    let mut nca =
+                        crate::formats::nca::Nca::from_reader(&mut cursor, keyset, title_keyset)?;
+                    let mut pfs0 = nca.open_pfs0_filesystem(0)?;
+                    // for each file
+                    let files = pfs0.list_files()?;
+                    for file in files {
+                        if file.ends_with(".cnmt") {
+                            let file = pfs0.read_file(&file)?;
+                            let mut cursor = std::io::Cursor::new(file);
+                            let cnmt = crate::formats::cnmt::Cnmt::from_reader(&mut cursor)?;
+                            cnmts.push(cnmt);
+                        }
+                    }
+                } else if file.name.ends_with(".cnmt") {
+                    let file = secure
+                        .get_file(&file.name)
+                        .ok_or(crate::error::Error::NotFound(file.name.clone()))?;
+                    let mut buf = vec![0u8; file.size as usize];
+                    secure.read_to_buf(&file, &mut buf)?;
+                    let mut cursor = std::io::Cursor::new(buf);
+                    let cnmt = crate::formats::cnmt::Cnmt::from_reader(&mut cursor)?;
+                    cnmts.push(cnmt);
+                }
+            }
+        }
+
+        Ok(cnmts)
+    }
+
+    fn title_id(&self) -> Result<u64, crate::error::Error> {
+        Ok(self.header.package_id)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use tracing_test::traced_test;
@@ -452,7 +502,7 @@ mod tests {
             .get_file("b48004cad1eea9744b3520a21603a61a.cnmt.nca")
             .unwrap();
         println!("Test file: {:?}", test);
-        let file = normal_part.read_file(&test).unwrap();
+        let file = normal_part.read_to_vec(&test).unwrap();
         let keyset = Keyset::from_file("prod.keys").unwrap();
 
         // Now let's try to cnmt parse this
@@ -468,9 +518,7 @@ mod tests {
         });
 
         // read file Application_010005501e68c000.cnmt
-        let test = pfs0
-            .extract_file("Application_010005501e68c000.cnmt")
-            .unwrap();
+        let test = pfs0.read_file("Application_010005501e68c000.cnmt").unwrap();
         let mut cursor = std::io::Cursor::new(test);
         let cnmt = Cnmt::from_reader(&mut cursor).unwrap();
         println!("{:#?}", cnmt);

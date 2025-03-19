@@ -329,7 +329,7 @@ impl<R: Read + Seek> Nca<R> {
         reader: R,
         keyset: &Keyset,
         title_keys: Option<&TitleKeys>,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
+    ) -> Result<Self, crate::error::Error> {
         // let's take the first 0xC00 bytes and decrypt them
         let mut reader = reader;
         let mut encrypted_buf = vec![0; 0xC00];
@@ -480,8 +480,9 @@ impl<R: Read + Seek> Nca<R> {
                 type Aes128EcbDec = ecb::Decryptor<aes::Aes128>;
 
                 // Create an ECB decryptor with our key and no padding
-                let mut decryptor = Aes128EcbDec::new_from_slice(&key)
-                    .map_err(|_| "Failed to create ECB decryptor")?;
+                let mut decryptor = Aes128EcbDec::new_from_slice(&key).map_err(|_| {
+                    crate::error::Error::CryptoError("Failed to create ECB decryptor".to_string())
+                })?;
 
                 // Decrypt the key area in-place
                 // The key area is exactly 64 bytes (0x40), which is a multiple of the AES block size (16 bytes)
@@ -601,7 +602,7 @@ impl<R: Read + Seek> Nca<R> {
     /// If the NCA has a rights ID, it uses the stored decrypted title key
     /// Otherwise, it uses the decrypted key area key
     #[inline]
-    pub fn get_aes_ctr_decrypt_key(&self) -> Result<[u8; 0x10], Box<dyn std::error::Error>> {
+    pub fn get_aes_ctr_decrypt_key(&self) -> Result<[u8; 0x10], crate::error::Error> {
         if self.has_rights_id() {
             // If title key is required, check if we have a decrypted one
             if let Some(dec_key) = self.dec_title_key {
@@ -612,10 +613,10 @@ impl<R: Read + Seek> Nca<R> {
 
             // Title key is required but not available
             let rights_id_hex = hex::encode(self.header.rights_id).to_uppercase();
-            return Err(format!(
+            return Err(crate::error::Error::KeyLookupError(format!(
                 "NCA requires title key for rights ID {}, but it was not available or could not be decrypted",
                 rights_id_hex
-            ).into());
+            )));
         }
 
         // NCA doesn't require title key, use key area's AES-CTR key
@@ -630,11 +631,10 @@ impl<R: Read + Seek> Nca<R> {
                 KeyAreaEncryptionKeyIndex::System => "key_area_key_system",
             };
 
-            return Err(format!(
+            return Err(crate::error::Error::KeyLookupError(format!(
                 "Key area could not be decrypted (missing {}_{:2x} in keys file)",
                 key_name, key_gen
-            )
-            .into());
+            )));
         }
 
         tracing::trace!(key = %hex::encode(self.dec_key_area.aes_ctr_key), "Using decrypted key area key");
@@ -648,9 +648,11 @@ impl<R: Read + Seek> Nca<R> {
         idx: usize,
         // fs_type: FsType,
         // fs_name: &str,
-    ) -> Result<Box<dyn ReadSeek + '_>, Box<dyn std::error::Error>> {
+    ) -> Result<Box<dyn ReadSeek + '_>, crate::error::Error> {
         if idx >= self.fs_headers.len() {
-            return Err("Invalid filesystem index".into());
+            return Err(crate::error::Error::InvalidState(
+                "Invalid filesystem index".to_string(),
+            ));
         }
 
         let fs_header = &self.fs_headers[idx];
@@ -660,7 +662,9 @@ impl<R: Read + Seek> Nca<R> {
 
         let fs_start_offset = self
             .get_fs_offset(idx)
-            .ok_or("Failed to get filesystem offset")?;
+            .ok_or(crate::error::Error::InvalidState(
+                "Failed to get filesystem offset".to_string(),
+            ))?;
 
         tracing::trace!(
             fs_index = idx,
@@ -745,11 +749,10 @@ impl<R: Read + Seek> Nca<R> {
             }
             _ => {
                 tracing::trace!(encryption_type = ?fs_header.encryption_type, "Unsupported encryption type");
-                Err(format!(
+                Err(crate::error::Error::InvalidData(format!(
                     "Unsupported encryption type: {:?}",
                     fs_header.encryption_type
-                )
-                .into())
+                )))
             }
         }
     }
@@ -758,7 +761,7 @@ impl<R: Read + Seek> Nca<R> {
     pub fn open_pfs0_filesystem(
         &mut self,
         idx: usize,
-    ) -> Result<Pfs0<Box<dyn ReadSeek + '_>>, Box<dyn std::error::Error>> {
+    ) -> Result<Pfs0<Box<dyn ReadSeek + '_>>, crate::error::Error> {
         // Prepare a reader for the PFS0 filesystem
         let mut reader = self.prepare_fs_reader(idx)?;
 
@@ -790,7 +793,10 @@ impl<R: Read + Seek> Nca<R> {
             }
             Err(e) => {
                 tracing::trace!(error = %e, "Failed to open PFS0");
-                Err(e)
+                Err(crate::error::Error::InvalidData(format!(
+                    "Failed to open PFS0: {}",
+                    e
+                )))
             }
         }
     }

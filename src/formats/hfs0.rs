@@ -85,11 +85,27 @@ impl<R: Read + Seek> Hfs0<R> {
         Ok(Self { header, reader })
     }
 
-    pub fn read_file(&mut self, file: &Hfs0File) -> Result<Vec<u8>, std::io::Error> {
+    /// Reads the file data into a vector of bytes
+    ///
+    /// Previously known as `list_files`, which is ironically a misnomer
+    pub fn read_to_vec(&mut self, file: &Hfs0File) -> Result<Vec<u8>, std::io::Error> {
         self.reader.seek(SeekFrom::Start(file.offset))?;
         let mut data = vec![0; file.size as usize];
         self.reader.read_exact(&mut data)?;
         Ok(data)
+    }
+
+    pub fn read_to_buf(&mut self, file: &Hfs0File, buf: &mut [u8]) -> Result<(), std::io::Error> {
+        self.reader.seek(SeekFrom::Start(file.offset))?;
+        self.reader.read_exact(buf)?;
+        Ok(())
+    }
+
+    pub fn subfile(&mut self, file: &Hfs0File) -> SubFile<R>
+    where
+        R: Clone,
+    {
+        SubFile::new(self.reader.clone(), file.offset, file.offset + file.size)
     }
 
     pub fn get_files(&self) -> Vec<Hfs0File> {
@@ -163,5 +179,4 @@ impl<R: Read + Seek> FileEntryExt<R> for Hfs0File {
     fn file_name(&self) -> String {
         self.name.clone()
     }
-
 }
