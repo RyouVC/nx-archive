@@ -10,6 +10,8 @@
 use binrw::prelude::*;
 use std::io::{Read, Seek, SeekFrom};
 
+use crate::{FileEntryExt, io::SubFile};
+
 /// Nintendo Switch HFS0 (Hashed File System 0) header structure
 ///
 /// This header is located at the beginning of an HFS0 archive file and contains:
@@ -85,7 +87,7 @@ impl<R: Read + Seek> Hfs0<R> {
 
     pub fn read_file(&mut self, file: &Hfs0File) -> Result<Vec<u8>, std::io::Error> {
         self.reader.seek(SeekFrom::Start(file.offset))?;
-        let mut data = vec![0; file.hash.len()];
+        let mut data = vec![0; file.size as usize];
         self.reader.read_exact(&mut data)?;
         Ok(data)
     }
@@ -103,7 +105,7 @@ impl<R: Read + Seek> Hfs0<R> {
                 let name = std::str::from_utf8(&filename_bytes[..end])
                     .unwrap()
                     .to_string();
-                
+
                 // Use the name we just extracted to call get_file()
                 // Since we know the file exists, unwrap is safe here
                 self.get_file(&name).unwrap()
@@ -117,30 +119,49 @@ impl<R: Read + Seek> Hfs0<R> {
             + (self.header.file_entries.len() * std::mem::size_of::<Hfs0Entry>())
             + self.header.string_table_size as usize;
 
-        self.header
-            .file_entries
-            .iter()
-            .find_map(|entry| {
-                let filename_bytes = &self.header.string_table[entry.filename_offset as usize..];
-                let end = filename_bytes
-                    .iter()
-                    .position(|&b| b == 0)
-                    .unwrap_or(filename_bytes.len());
-                let entry_name = std::str::from_utf8(&filename_bytes[..end])
-                    .unwrap()
-                    .to_string();
-                    
-                if entry_name == name {
-                    Some(Hfs0File {
-                        name: entry_name,
-                        size: entry.size,
-                        // Add header size to the offset to get the absolute file position
-                        offset: entry.offset + header_size as u64,
-                        hash: entry.sha256,
-                    })
-                } else {
-                    None
-                }
-            })
+        self.header.file_entries.iter().find_map(|entry| {
+            let filename_bytes = &self.header.string_table[entry.filename_offset as usize..];
+            let end = filename_bytes
+                .iter()
+                .position(|&b| b == 0)
+                .unwrap_or(filename_bytes.len());
+            let entry_name = std::str::from_utf8(&filename_bytes[..end])
+                .unwrap()
+                .to_string();
+
+            if entry_name == name {
+                Some(Hfs0File {
+                    name: entry_name,
+                    size: entry.size,
+                    // Add header size to the offset to get the absolute file position
+                    offset: entry.offset + header_size as u64,
+                    hash: entry.sha256,
+                })
+            } else {
+                None
+            }
+        })
     }
+}
+
+impl<R: Read + Seek> FileEntryExt<R> for Hfs0File {
+    fn file_reader(&self, reader: R) -> Result<SubFile<R>, crate::error::Error> {
+        Ok(SubFile::new(reader, self.offset, self.offset + self.size))
+    }
+
+    fn file_size(&self) -> u64 {
+        self.size
+    }
+
+    fn read_bytes(&self, reader: R, size: usize) -> Result<Vec<u8>, crate::error::Error> {
+        let mut buf = vec![0; size];
+        let mut reader = reader;
+        reader.seek(SeekFrom::Start(self.offset))?;
+        reader.read_exact(&mut buf)?;
+        Ok(buf)
+    }
+    fn file_name(&self) -> String {
+        self.name.clone()
+    }
+
 }

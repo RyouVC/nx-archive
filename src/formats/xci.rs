@@ -337,21 +337,25 @@ impl<R: Read + Seek> Xci<R> {
     /// Gets the offset to the HFS0 partition
     pub fn get_hfs0_offset(&self) -> u64 {
         if self.key_area.is_some() {
-            (0x1000 + self.header.hfs0_offset).into()
+            0x1000 + self.header.hfs0_offset
         } else {
-            self.header.hfs0_offset.into()
+            self.header.hfs0_offset
         }
     }
 
-    /// Reads the HFS0 header
-    pub fn read_hfs0_header(&mut self) -> binrw::BinResult<Hfs0<SubFile<&mut R>>> {
+    /// Reads the initial HFS0 header on the XCI file, returning a list of partitions found
+    #[tracing::instrument(skip(self), level = "trace")]
+    pub fn list_hfs0_partitions(&mut self) -> binrw::BinResult<Hfs0<SubFile<&mut R>>> {
         let hfs0_offset = self.get_hfs0_offset();
         self.reader.seek(SeekFrom::Start(hfs0_offset))?;
 
+        // Create a SubFile that covers the entire rest of the XCI file
+        // This allows reading the HFS0 header and all partition data
         let subfile = SubFile::new(
             &mut self.reader,
             hfs0_offset,
-            hfs0_offset + self.header.hfs0_header_size,
+            // Don't limit to just header_size - we need access to the full content
+            hfs0_offset + (self.header.valid_data_end_address as u64 * MEDIA_SIZE),
         );
         let hfs0 = Hfs0::new(subfile)?;
 
@@ -360,12 +364,13 @@ impl<R: Read + Seek> Xci<R> {
         Ok(hfs0)
     }
 
+    /// Opens an HFS0 partition by name, returning the partition if it exists
     #[tracing::instrument(skip(self), level = "trace")]
     pub fn open_hfs0_partition(
         &mut self,
         part_name: &str,
     ) -> binrw::BinResult<Option<Hfs0<SubFile<&mut R>>>> {
-        let hfs0_header = self.read_hfs0_header()?;
+        let hfs0_header = self.list_hfs0_partitions()?;
 
         // trace!("Attempting to open HFS0 partition: {}", part_name);
         let part = hfs0_header.get_file(part_name);
@@ -377,9 +382,7 @@ impl<R: Read + Seek> Xci<R> {
             let start_offset = hfs0_offset + file.offset;
             let end_offset = start_offset + file.size;
 
-            let subfile = SubFile::new(&mut self.reader, start_offset, end_offset);
-
-            let part = Hfs0::new(subfile)?;
+            let part = Hfs0::new(SubFile::new(&mut self.reader, start_offset, end_offset))?;
 
             trace!("HFS0 partition opened successfully");
 
@@ -388,11 +391,36 @@ impl<R: Read + Seek> Xci<R> {
 
         Ok(None)
     }
+
+    /// Opens the `secure` partition if it exists
+    #[tracing::instrument(skip(self), level = "trace")]
+    pub fn open_secure_partition(&mut self) -> binrw::BinResult<Option<Hfs0<SubFile<&mut R>>>> {
+        self.open_hfs0_partition("secure")
+    }
+
+    /// Opens the `normal` partition if it exists
+    #[tracing::instrument(skip(self), level = "trace")]
+    pub fn open_normal_partition(&mut self) -> binrw::BinResult<Option<Hfs0<SubFile<&mut R>>>> {
+        self.open_hfs0_partition("normal")
+    }
+
+    /// Opens the `logo` partition if it exists
+    #[tracing::instrument(skip(self), level = "trace")]
+    pub fn open_logo_partition(&mut self) -> binrw::BinResult<Option<Hfs0<SubFile<&mut R>>>> {
+        self.open_hfs0_partition("logo")
+    }
+
+    #[tracing::instrument(skip(self), level = "trace")]
+    pub fn open_update_partition(&mut self) -> binrw::BinResult<Option<Hfs0<SubFile<&mut R>>>> {
+        self.open_hfs0_partition("update")
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use tracing_test::traced_test;
+
+    use crate::formats::{Keyset, cnmt::Cnmt};
 
     use super::*;
     use std::fs::File;
@@ -411,11 +439,38 @@ mod tests {
         println!("{:?}", xci.gamecard_cert);
 
         // xci.read_hfs0_header().unwrap();
-        let normal_part = xci.open_hfs0_partition("secure").unwrap().unwrap();
+        let parts = xci.list_hfs0_partitions().unwrap();
+        println!("{:#?}", parts.get_files());
+        let mut normal_part = xci.open_hfs0_partition("secure").unwrap().unwrap();
 
         let files = normal_part.get_files();
         for file in &files {
             println!("File: {:?}", file);
         }
+
+        let test = normal_part
+            .get_file("b48004cad1eea9744b3520a21603a61a.cnmt.nca")
+            .unwrap();
+        println!("Test file: {:?}", test);
+        let file = normal_part.read_file(&test).unwrap();
+        let keyset = Keyset::from_file("prod.keys").unwrap();
+
+        // Now let's try to cnmt parse this
+        let mut cursor = std::io::Cursor::new(file);
+        let mut nca = crate::formats::nca::Nca::from_reader(&mut cursor, &keyset, None).unwrap();
+        // println!("{:#?}", nca);
+
+        // open pfs0
+        let mut pfs0 = nca.open_pfs0_filesystem(0).unwrap();
+        let files = pfs0.list_files();
+        for file in files {
+            println!("File: {:?}", file);
+        }
+
+        // read file Application_010005501e68c000.cnmt
+        let test = pfs0.extract_file("Application_010005501e68c000.cnmt").unwrap();
+        let mut cursor = std::io::Cursor::new(test);
+        let cnmt = Cnmt::from_reader(&mut cursor).unwrap();
+        println!("{:#?}", cnmt);
     }
 }

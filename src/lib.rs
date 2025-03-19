@@ -1,8 +1,6 @@
-use std::io::{Read, Seek};
-
+#![doc = include_str!("../README.md")]
+pub mod error;
 pub mod formats;
 pub mod io;
-impl<T: Read + Seek> ReadSeek for T {}
-pub trait ReadSeek: Read + Seek {}
-
-
+pub mod util;
+pub use util::*;

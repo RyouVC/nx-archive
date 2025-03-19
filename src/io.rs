@@ -77,6 +77,7 @@ impl<R: Read + Seek> Seek for SharedReader<R> {
 }
 
 /// Represents a sub-section of a file
+#[derive(Debug)]
 pub struct SubFile<R: Read + Seek> {
     reader: R,
     start: u64,

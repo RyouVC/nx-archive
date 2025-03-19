@@ -4,8 +4,9 @@ use std::io::{Read, Result as IoResult, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-// use crate::error::Error;
-use crate::io::SharedReader;
+use crate::io::SubFile;
+use crate::FileEntryExt;
+
 
 /// Custom error type for RomFS operations
 #[derive(Debug, thiserror::Error)]
@@ -560,5 +561,26 @@ impl<R: Read + Seek + Clone> Clone for RomFs<R> {
             cache_dir_entries: self.cache_dir_entries.clone(),
             cache_file_entries: self.cache_file_entries.clone(),
         }
+    }
+}
+
+
+impl<R: Read + Seek> FileEntryExt<R> for FileEntry {
+    fn read_bytes(&self, mut reader: R, size: usize) -> Result<Vec<u8>, crate::error::Error> {
+        let mut buf = vec![0; size];
+        reader.seek(SeekFrom::Start(self.data_offset))?;
+        reader.read_exact(&mut buf)?;
+        Ok(buf)
+    }
+    fn file_reader(&self, reader: R) -> Result<SubFile<R>, crate::error::Error> {
+        Ok(SubFile::new(reader, self.data_offset, self.data_offset + self.data_size))
+    }
+
+    fn file_size(&self) -> u64 {
+        self.data_size
+    }
+
+    fn file_name(&self) -> String {
+        self.name.clone()
     }
 }
