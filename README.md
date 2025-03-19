@@ -37,8 +37,8 @@ fn main() {
     let nsp_file = File::open("path/to/file.nsp").unwrap();
     let pfs0 = Pfs0::from_reader(nsp_file).unwrap();
 
-    for file in pfs0.list_files() {
-        println!("File: {}", file.name());
+    for file in pfs0.list_files().unwrap() {
+        println!("File: {}", file.name);
     }
 }
 ```

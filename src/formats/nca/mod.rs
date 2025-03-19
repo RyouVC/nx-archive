@@ -33,6 +33,7 @@
 use binrw::prelude::*;
 use std::io::{Read, Seek};
 
+mod keys;
 mod types;
 
 // Add tracing instrument import
@@ -45,15 +46,16 @@ use super::keyset::get_nintendo_tweak;
 use super::pfs0::Pfs0;
 use super::romfs::RomFs; // Add import for RomFs
 use super::{Keyset, TitleKeys};
+use keys::NcaKeyManagement;
 use types::*;
-// The first 0xC00 bytes are encrypted with AES-XTS with sector size 0x200
-// with a non-standard "tweak" (endianness is reversed as big endian), this
-// encrypted data is an 0x400 NCA header + an 0x200 header for each section
-// in the section table.
 
-// For pre-1.0.0 "NCA2" NCAs, the first 0x400 byte are encrypted the same way as in NCA3.
-// However, each section header is individually encrypted as though it were sector 0, instead
-// of the appropriate sector as in NCA3.
+// Constants for NCA structure
+const NCA_HEADER_SIZE: usize = 0x400;
+const SECTION_HEADER_SIZE: usize = 0x200;
+const TOTAL_HEADER_SIZE: usize = 0xC00;
+const HEADER_CONTENT_SIZE: usize = 0x340;
+const BLOCK_SIZE: usize = 0x200;
+const MAX_FS_COUNT: usize = 4;
 
 /// Encrypts data with the NCA header key using AES-XTS with Nintendo's special tweak
 pub fn encrypt_with_header_key(
@@ -81,23 +83,20 @@ pub fn decrypt_with_header_key(
     keyset: &Keyset,
     sector_size: usize,
     first_sector_index: u128,
-) -> Vec<u8> {
+) -> Result<Vec<u8>, crate::error::Error> {
     let mut decrypted = data.to_vec();
-    let xts = keyset.header_crypt();
+    let xts = keyset.header_crypt().ok_or_else(|| {
+        crate::error::Error::CryptoError("Failed to get header crypt".to_string())
+    })?;
 
-    if let Some(xts) = xts {
-        xts.decrypt_area(
-            &mut decrypted,
-            sector_size,
-            first_sector_index,
-            get_nintendo_tweak,
-        );
-    } else {
-        // Handle the case where xts is None
-        panic!("Failed to get header crypt");
-    }
+    xts.decrypt_area(
+        &mut decrypted,
+        sector_size,
+        first_sector_index,
+        get_nintendo_tweak,
+    );
 
-    decrypted
+    Ok(decrypted)
 }
 
 /// Represents the version of an NCA file
@@ -151,9 +150,8 @@ impl From<u8> for NcaVersion {
     }
 }
 
-pub const BLOCK_SIZE: usize = 0x200;
-
 /// Calculates the offset in bytes for a block offset
+#[inline]
 pub fn get_block_offset(offset: u64) -> u64 {
     BLOCK_SIZE as u64 * offset
 }
@@ -319,9 +317,7 @@ pub struct Nca<R: Read + Seek> {
     reader: R,
     pub header: NcaHeader,
     pub fs_headers: Vec<FsHeader>,
-    dec_title_key: Option<[u8; 0x10]>,
-    dec_key_area: KeyArea, // Add decrypted key area to store
-    key_status: bool,      // Track whether keys are properly initialized
+    key_management: NcaKeyManagement,
 }
 
 impl<R: Read + Seek> Nca<R> {
@@ -335,16 +331,15 @@ impl<R: Read + Seek> Nca<R> {
         keyset: &Keyset,
         title_keys: Option<&TitleKeys>,
     ) -> Result<Self, crate::error::Error> {
-        // let's take the first 0xC00 bytes and decrypt them
         let mut reader = reader;
-        let mut encrypted_buf = vec![0; 0xC00];
+        let mut encrypted_buf = vec![0; TOTAL_HEADER_SIZE];
         reader.read_exact(&mut encrypted_buf)?;
 
-        let decrypted = decrypt_with_header_key(&encrypted_buf, keyset, 0x200, 0);
+        let decrypted = decrypt_with_header_key(&encrypted_buf, keyset, BLOCK_SIZE, 0)?;
 
         let header = {
-            let header_slice = &decrypted[..0x340];
-            let header_array: &[u8; 0x340] = header_slice
+            let header_slice = &decrypted[..HEADER_CONTENT_SIZE];
+            let header_array: &[u8; HEADER_CONTENT_SIZE] = header_slice
                 .try_into()
                 .expect("Slice length doesn't match array length");
             NcaHeader::from_bytes(header_array)?
@@ -368,7 +363,7 @@ impl<R: Read + Seek> Nca<R> {
         );
 
         // Parse the filesystem headers
-        let mut fs_headers = Vec::new();
+        let mut fs_headers = Vec::with_capacity(MAX_FS_COUNT);
 
         for (i, entry) in header.fs_entries.iter().enumerate() {
             // Skip empty entries (both start and end offset are 0)
@@ -377,147 +372,27 @@ impl<R: Read + Seek> Nca<R> {
             }
 
             // Each FS header is 0x200 bytes, starting at offset 0x400
-            let fs_header_offset = 0x400 + (i * 0x200);
+            let fs_header_offset = NCA_HEADER_SIZE + (i * SECTION_HEADER_SIZE);
 
             // Make sure we don't go past the end of our decrypted buffer
-            if fs_header_offset + 0x200 > decrypted.len() {
+            if fs_header_offset + SECTION_HEADER_SIZE > decrypted.len() {
                 tracing::warn!("FS header {} is out of bounds", i);
                 break;
             }
 
             // Parse the filesystem header
-            let fs_header_data = &decrypted[fs_header_offset..fs_header_offset + 0x200];
+            let fs_header_data =
+                &decrypted[fs_header_offset..fs_header_offset + SECTION_HEADER_SIZE];
             let mut cursor = binrw::io::Cursor::new(fs_header_data);
             let fs_header: FsHeader = cursor.read_le()?;
 
             fs_headers.push(fs_header);
         }
 
-        // Initialize decrypted key area
-        let mut dec_key_area = KeyArea::default();
-        // Default key_status is true
-        let mut key_status = true;
+        // Initialize key management
+        let key_management = NcaKeyManagement::new(&header, keyset, title_keys)?;
 
-        // Process key decryption based on rights ID
-        let dec_title_key = if !header.rights_id.iter().all(|&b| b == 0) {
-            // If we have rights ID, try to get the title key
-            let rights_id_hex = hex::encode(header.rights_id).to_uppercase();
-            tracing::trace!(rights_id = %rights_id_hex, "NCA requires title key");
-
-            // Get the key generation
-            let key_gen = header.get_key_generation();
-
-            // First check if we have title keys database
-            if let Some(title_keys_db) = title_keys {
-                // Get the title KEK for this key generation
-                let title_kek = keyset.get_title_kek(key_gen as usize);
-                tracing::trace!(
-                    key_gen = %key_gen,
-                    title_kek = ?title_kek,
-                    "Title KEK obtained"
-                );
-
-                // Try to decrypt the title key
-
-                if let Some(title_kek) = title_kek {
-                    // Try to decrypt the title key
-                    match title_keys_db.decrypt_title_key(&rights_id_hex, &title_kek) {
-                        Ok(dec_key) => Some(dec_key),
-                        Err(e) => {
-                            tracing::warn!("Failed to decrypt title key: {}", e);
-                            key_status = false;
-                            None
-                        }
-                    }
-                } else {
-                    tracing::warn!(
-                        "Title key encryption key not present for key generation {}",
-                        key_gen
-                    );
-                    key_status = false;
-                    None
-                }
-            } else {
-                // No title keys database provided
-                tracing::warn!("NCA requires title key but no title keys database was supplied");
-                key_status = false;
-                None
-            }
-        } else {
-            // If no rights ID, decrypt key area
-            tracing::trace!("NCA does not require title key, attempting to get key area key");
-            let key_gen = header.get_key_generation();
-
-            // Get the appropriate key area key based on index
-            let key_area_key = match header.key_area_appkey_index {
-                KeyAreaEncryptionKeyIndex::Application => {
-                    let key = keyset.get_key_area_key_application(key_gen as usize);
-                    tracing::trace!(key_gen = %key_gen, key_type = "Application", key = ?key, "Key area key obtained");
-                    key
-                }
-                KeyAreaEncryptionKeyIndex::Ocean => {
-                    let key = keyset.get_key_area_key_ocean(key_gen as usize);
-                    tracing::trace!(key_gen = %key_gen, key_type = "Ocean", key = ?key, "Key area key obtained");
-                    key
-                }
-                KeyAreaEncryptionKeyIndex::System => {
-                    let key = keyset.get_key_area_key_system(key_gen as usize);
-                    tracing::trace!(key_gen = %key_gen, key_type = "System", key = ?key, "Key area key obtained");
-                    key
-                }
-            };
-
-            // If we have a key, decrypt the key area
-            if let Some(key) = key_area_key {
-                tracing::trace!(
-                    encrypted_key = %hex::encode(header.encrypted_keys.aes_ctr_key),
-                    "Decrypting key area"
-                );
-
-                // Properly decrypt the key area using ECB Decryptor, matching CNTX implementation
-                use cipher::BlockDecryptMut;
-                use cipher::KeyInit;
-
-                // Create a copy of the encrypted key area
-                let mut key_area_copy = header.encrypted_keys.clone();
-
-                // Define the type for our ECB decryptor
-                type Aes128EcbDec = ecb::Decryptor<aes::Aes128>;
-
-                // Create an ECB decryptor with our key and no padding
-                let mut decryptor = Aes128EcbDec::new_from_slice(&key).map_err(|_| {
-                    crate::error::Error::CryptoError("Failed to create ECB decryptor".to_string())
-                })?;
-
-                // Decrypt the key area in-place
-                // The key area is exactly 64 bytes (0x40), which is a multiple of the AES block size (16 bytes)
-                // So we don't need to worry about padding
-                decryptor.decrypt_blocks_mut(unsafe {
-                    core::slice::from_raw_parts_mut(
-                        &mut key_area_copy as *mut KeyArea as *mut aes::Block,
-                        std::mem::size_of::<KeyArea>() / 16, // 4 blocks of 16 bytes each
-                    )
-                });
-
-                dec_key_area = key_area_copy;
-
-                tracing::trace!(
-                    decrypted_key = %hex::encode(dec_key_area.aes_ctr_key),
-                    "Key area decrypted"
-                );
-            } else {
-                tracing::warn!(
-                    key_type = ?header.key_area_appkey_index,
-                    key_gen = %key_gen,
-                    "Key area key not present"
-                );
-                key_status = false;
-            }
-
-            None
-        };
-
-        // After obtaining fs_headers:
+        // Log filesystem headers
         tracing::trace!(
             fs_header_count = fs_headers.len(),
             "NCA filesystem headers decoded"
@@ -537,9 +412,7 @@ impl<R: Read + Seek> Nca<R> {
             reader,
             header,
             fs_headers,
-            dec_title_key,
-            dec_key_area,
-            key_status,
+            key_management,
         })
     }
 
@@ -556,7 +429,6 @@ impl<R: Read + Seek> Nca<R> {
         }
 
         // Find the corresponding fs_entry by index
-        // This works because we populate fs_headers in the same order as valid fs_entries
         let valid_entries: Vec<_> = self
             .header
             .fs_entries
@@ -581,69 +453,14 @@ impl<R: Read + Seek> Nca<R> {
     /// Check if the NCA has valid keys for decryption
     #[inline]
     pub fn has_valid_keys(&self) -> bool {
-        self.key_status
+        self.key_management.has_valid_keys()
     }
 
-    /// Get the key generation to use (accounting for old key_generation field)
-    pub fn get_key_generation(&self) -> u8 {
-        let key_gen_old = self.header.key_generation_old as u8;
-        let key_gen = self.header.key_generation as u8;
-
-        // Use the higher of the two key generation values
-        let base_key_gen = if key_gen_old < key_gen {
-            key_gen
-        } else {
-            key_gen_old
-        };
-
-        // Both 0 and 1 are master key 0
-        if base_key_gen > 1 {
-            base_key_gen - 1
-        } else {
-            base_key_gen
-        }
-    }
     /// Gets the AES-CTR key for decryption
-    /// If the NCA has a rights ID, it uses the stored decrypted title key
-    /// Otherwise, it uses the decrypted key area key
     #[inline]
     pub fn get_aes_ctr_decrypt_key(&self) -> Result<[u8; 0x10], crate::error::Error> {
-        if self.has_rights_id() {
-            // If title key is required, check if we have a decrypted one
-            if let Some(dec_key) = self.dec_title_key {
-                // Title key is required and available, use it
-                tracing::trace!(key = %hex::encode(dec_key), "Using decrypted title key");
-                return Ok(dec_key);
-            }
-
-            // Title key is required but not available
-            let rights_id_hex = hex::encode(self.header.rights_id).to_uppercase();
-            return Err(crate::error::Error::KeyLookupError(format!(
-                "NCA requires title key for rights ID {}, but it was not available or could not be decrypted",
-                rights_id_hex
-            )));
-        }
-
-        // NCA doesn't require title key, use key area's AES-CTR key
-        if !self.key_status {
-            // Provide more specific error message based on the key area encryption key index and key generation
-            let key_gen = self.get_key_generation();
-            let key_type = self.header.key_area_appkey_index;
-
-            let key_name = match key_type {
-                KeyAreaEncryptionKeyIndex::Application => "key_area_key_application",
-                KeyAreaEncryptionKeyIndex::Ocean => "key_area_key_ocean",
-                KeyAreaEncryptionKeyIndex::System => "key_area_key_system",
-            };
-
-            return Err(crate::error::Error::KeyLookupError(format!(
-                "Key area could not be decrypted (missing {}_{:2x} in keys file)",
-                key_name, key_gen
-            )));
-        }
-
-        tracing::trace!(key = %hex::encode(self.dec_key_area.aes_ctr_key), "Using decrypted key area key");
-        Ok(self.dec_key_area.aes_ctr_key)
+        self.key_management
+            .get_aes_ctr_decrypt_key(&self.header.rights_id)
     }
 
     /// Private helper method to prepare a reader for any filesystem type
@@ -651,8 +468,6 @@ impl<R: Read + Seek> Nca<R> {
     fn prepare_fs_reader(
         &mut self,
         idx: usize,
-        // fs_type: FsType,
-        // fs_name: &str,
     ) -> Result<Box<dyn ReadSeek + '_>, crate::error::Error> {
         if idx >= self.fs_headers.len() {
             return Err(crate::error::Error::InvalidState(
@@ -661,10 +476,6 @@ impl<R: Read + Seek> Nca<R> {
         }
 
         let fs_header = &self.fs_headers[idx];
-        // if fs_header.fs_type != fs_type {
-        //     return Err(format!("Invalid filesystem type: {:?}", fs_header.fs_type).into());
-        // }
-
         let fs_start_offset = self
             .get_fs_offset(idx)
             .ok_or(crate::error::Error::InvalidState(
@@ -681,75 +492,41 @@ impl<R: Read + Seek> Nca<R> {
             "Opening filesystem sector",
         );
 
-        // Determine the filesystem data offset based on hash data structure
-
-        // This will be different depending on the encryption type.
-        // For unencrypted filesystems, we use this offset directly though. I think.
-        let fs_offset_abs = match &fs_header.hash_data {
+        // Get filesystem data offset and size from hash data
+        let (fs_offset_abs, fs_size) = match &fs_header.hash_data {
             HashData::HierarchicalSha256(hash) => {
                 tracing::trace!(?hash, "Hierarchical SHA-256 hash data");
-                // for SHA-256 hashes, we get the offset from the first (actually second)
-                // level of the hash data
-                hash.layer_regions[0].offset
+                (hash.layer_regions[0].offset, hash.layer_regions[0].size)
             }
             HashData::HierarchicalIntegrity(hash) => {
                 tracing::trace!(?hash, "Hierarchical Integrity hash data");
-                // for Integrity hashes, we get the offset from the last level
-                hash.info_level_hash.levels.last().unwrap().logical_offset
+                let last_level = hash.info_level_hash.levels.last().unwrap();
+                (last_level.logical_offset, last_level.size)
             }
-        } + fs_start_offset;
+        };
+
+        let fs_offset_abs = fs_offset_abs + fs_start_offset;
 
         tracing::trace!(
             fs_offset_abs = format!("0x{:X}", fs_offset_abs),
             "Absolute filesystem offset",
         );
 
-        let fs_size = match &fs_header.hash_data {
-            HashData::HierarchicalSha256(hash) => {
-                tracing::trace!(?hash, "Hierarchical SHA-256 hash data");
-                // for SHA-256 hashes, we get the size from the first (actually second)
-                // level of the hash data
-                hash.layer_regions[0].size
-            }
-            HashData::HierarchicalIntegrity(hash) => {
-                tracing::trace!(?hash, "Hierarchical Integrity hash data");
-                // for Integrity hashes, we get the size from the last level
-                hash.info_level_hash.levels.last().unwrap().size
-            }
-        };
-
         match fs_header.encryption_type {
             EncryptionType::None => {
                 tracing::trace!("No encryption detected");
-
-                // Seek to the filesystem start offset
                 let reader = std::io::BufReader::new(self.reader.by_ref());
-
                 let subfile = SubFile::new(reader, fs_offset_abs, fs_offset_abs + fs_size);
-
-                // Box the reader
                 Ok(Box::new(subfile))
             }
             EncryptionType::AesCtr => {
                 tracing::trace!("Using AES-CTR decryption");
-
-                // Get the proper decryption key
                 let decrypt_key = self.get_aes_ctr_decrypt_key()?.to_vec();
                 tracing::trace!(decrypt_key = %hex::encode(&decrypt_key), "Decryption key obtained");
 
-                tracing::trace!(
-                    abs_fs_offset = format!("0x{:X}", fs_offset_abs),
-                    "Final filesystem absolute offset",
-                );
-
-                // Create a reader for the NCA file
                 let reader = std::io::BufReader::new(self.reader.by_ref());
-
-                // Create the AES-CTR reader using our decrypted key
                 let aes_reader =
                     Aes128CtrReader::new(reader, fs_offset_abs, fs_header.ctr, decrypt_key);
-
-                // Box the reader
                 Ok(Box::new(aes_reader))
             }
             _ => {
@@ -767,7 +544,6 @@ impl<R: Read + Seek> Nca<R> {
         &mut self,
         idx: usize,
     ) -> Result<Pfs0<Box<dyn ReadSeek + '_>>, crate::error::Error> {
-        // Prepare a reader for the PFS0 filesystem
         let mut reader = self.prepare_fs_reader(idx)?;
 
         // Read and log the magic bytes for debugging
@@ -781,29 +557,14 @@ impl<R: Read + Seek> Nca<R> {
             "PFS0 magic bytes"
         );
 
-        // Reset position to beginning
         reader.seek(std::io::SeekFrom::Start(0))?;
+        let pfs0 = Pfs0::from_reader(reader)?;
 
-        // Attempt to open the PFS0
-        tracing::trace!("Attempting to open PFS0");
-        match Pfs0::from_reader(reader) {
-            Ok(pfs0) => {
-                // List the files if available
-                if let Ok(files) = pfs0.list_files() {
-                    tracing::trace!(files = ?files, "PFS0 opened successfully");
-                } else {
-                    tracing::trace!("PFS0 opened successfully but file listing failed");
-                }
-                Ok(pfs0)
-            }
-            Err(e) => {
-                tracing::trace!(error = %e, "Failed to open PFS0");
-                Err(crate::error::Error::InvalidData(format!(
-                    "Failed to open PFS0: {}",
-                    e
-                )))
-            }
+        if let Ok(files) = pfs0.list_files() {
+            tracing::trace!(files = ?files, "PFS0 opened successfully");
         }
+
+        Ok(pfs0)
     }
 
     #[instrument(level = "trace", skip(self))]
@@ -813,7 +574,6 @@ impl<R: Read + Seek> Nca<R> {
     ) -> Result<RomFs<Box<dyn ReadSeek + '_>>, crate::error::Error> {
         tracing::trace!(idx, "Opening RomFS filesystem");
 
-        // Let's do some checks first to make sure we can open the RomFS
         if idx >= self.fs_headers.len() {
             return Err(crate::error::Error::InvalidState(
                 "Invalid filesystem index".to_string(),
@@ -828,14 +588,10 @@ impl<R: Read + Seek> Nca<R> {
             )));
         }
 
-        // Prepare a reader for the RomFS filesystem
         let reader = self.prepare_fs_reader(idx)?;
-
-        // Attempt to open the RomFS
-        tracing::trace!("Attempting to open RomFS");
-
         RomFs::from_reader(reader)
     }
+
     pub fn decrypt_and_dump_fs(&mut self, idx: usize) -> Result<Vec<u8>, crate::error::Error> {
         tracing::trace!("Decrypting and dumping filesystem {}", idx);
         let mut reader = self.prepare_fs_reader(idx)?;
@@ -928,7 +684,6 @@ mod tests {
             }
         }
 
-        // nca.decrypt_and_dump_fs(0).unwrap();
         Ok(())
     }
 
@@ -1076,17 +831,11 @@ mod tests {
         let encrypted = encrypt_with_header_key(&to_be_encrypted, &keyset, 0x200, 0);
 
         // Decrypt the header
-
-        let decrypted = decrypt_with_header_key(&encrypted, &keyset, 0x200, 0);
+        let decrypted = decrypt_with_header_key(&encrypted, &keyset, 0x200, 0).unwrap();
 
         // take the header
         let decrypted_header = &decrypted[..0x340];
 
         assert_eq!(header_bytes, decrypted_header);
-
-        // let decrypted_header: NcaHeader =
-        //     NcaHeader::from_bytes(&(decrypted_header.try_into().unwrap())).unwrap();
-
-        // assert_eq!(header, decrypted_header);
     }
 }

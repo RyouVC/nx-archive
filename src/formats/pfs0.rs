@@ -105,7 +105,7 @@ impl Pfs0Entry {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 /// Represents a file within the PFS0 archive with both metadata and name
 pub struct Pfs0File {
     /// Filename extracted from the string table
@@ -179,21 +179,20 @@ impl<R: Read + Seek> Pfs0<R> {
             })
     }
 
-    /// Get all files in the archive
-    pub fn get_files(&self) -> Vec<Pfs0File> {
-        self.files
-            .iter()
-            .map(|f| Pfs0File {
-                name: f.name.clone(),
-                data_offset: f.data_offset,
-                size: f.size,
-            })
-            .collect()
-    }
+    // /// Get all files in the archive
+    // pub fn get_files(&self) -> Vec<Pfs0File> {
+    //     self.files
+    //         .iter()
+    //         .map(|f| Pfs0File {
+    //             name: f.name.clone(),
+    //             data_offset: f.data_offset,
+    //             size: f.size,
+    //         })
+    //         .collect()
+    // }
 
-    pub fn list_files(&self) -> Result<Vec<String>, crate::error::Error> {
-        let files = self.files.iter().map(|f| f.name.clone()).collect();
-        Ok(files)
+    pub fn list_files(&self) -> Result<Vec<Pfs0File>, crate::error::Error> {
+        Ok(self.files.clone())
     }
 
     pub fn file_count(&self) -> usize {
@@ -201,12 +200,9 @@ impl<R: Read + Seek> Pfs0<R> {
     }
 
     /// Extract a file from the PFS0 archive by its path/name
-    pub fn read_file(&mut self, vpath: &str) -> Result<Vec<u8>, crate::error::Error> {
-        let file = self
-            .get_file(vpath)
-            .ok_or_else(|| crate::error::Error::NotFound(format!("File not found: {}", vpath)))?;
+    pub fn read_to_vec(&mut self, file: &Pfs0File) -> Result<Vec<u8>, crate::error::Error> {
         let mut data = vec![0; file.size as usize];
-        self.read_buf(&file, &mut data)?;
+        self.read_buf(file, &mut data)?;
         Ok(data)
     }
 
@@ -258,7 +254,7 @@ impl<R: Read + Seek + Clone> TitleDataExt for Pfs0<R> {
     ) -> Result<Vec<crate::formats::cnmt::Cnmt>, crate::error::Error> {
         let mut cnmts = Vec::new();
 
-        // Collect filenames first to avoid borrowing conflict
+        // Collect just the filenames to avoid borrow conflicts
         let cnmt_ncas: Vec<String> = self
             .files
             .iter()
@@ -266,9 +262,12 @@ impl<R: Read + Seek + Clone> TitleDataExt for Pfs0<R> {
             .map(|file| file.name.clone())
             .collect();
 
-        // Now we can process each file
+        // Process each file by name
         for filename in cnmt_ncas {
-            let data = self.read_file(&filename)?;
+            let file = self.get_file(&filename).ok_or_else(|| {
+                crate::error::Error::NotFound(format!("File not found: {}", filename))
+            })?;
+            let data = self.read_to_vec(&file)?;
             let mut nca = crate::formats::nca::Nca::from_reader(
                 std::io::Cursor::new(data),
                 keyset,
@@ -276,8 +275,8 @@ impl<R: Read + Seek + Clone> TitleDataExt for Pfs0<R> {
             )?;
             let mut pfs0 = nca.open_pfs0_filesystem(0)?;
             for file in pfs0.list_files()? {
-                if file.ends_with(".cnmt") {
-                    let data = pfs0.read_file(&file)?;
+                if file.name.ends_with(".cnmt") {
+                    let data = pfs0.read_to_vec(&file)?;
                     let cnmt =
                         crate::formats::cnmt::Cnmt::from_reader(&mut std::io::Cursor::new(data))?;
                     cnmts.push(cnmt);
@@ -308,7 +307,7 @@ impl<R: Read + Seek + Clone> VirtualFSExt<R> for Pfs0<R> {
     type Entry = Pfs0File;
 
     fn list_files(&self) -> Result<Vec<Self::Entry>, crate::error::Error> {
-        Ok(self.get_files())
+        self.list_files()
     }
 
     fn get_file(&self, name: &str) -> Result<Option<Self::Entry>, crate::error::Error> {
@@ -368,7 +367,8 @@ mod tests {
         // Use a string literal for include_bytes!
         let fixture_data =
             include_bytes!("../../test/Browser/2b9b99ea58139c320c82055c337135df.nca");
-        let data = pfs0.read_file(vpath).unwrap();
+        let file = pfs0.get_file(vpath).unwrap();
+        let data = pfs0.read_to_vec(&file).unwrap();
         println!("Data length: {}", data.len());
         // write to file
         std::fs::write("test_tmp/output.nca", &data).expect("Failed to write file");

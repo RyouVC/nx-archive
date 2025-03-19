@@ -254,12 +254,12 @@ impl<R: Read + Seek> RomFs<R> {
         hash % (table_size as u32)
     }
 
-    pub fn list_files(&mut self) -> Result<Vec<String>, Error> {
+    pub fn list_files(&mut self) -> Result<Vec<FileEntry>, Error> {
         let mut files = Vec::new();
 
         for offset in 0..self.file_hash_table.len() {
             if let Ok(file) = self.read_file_entry(offset as u32) {
-                files.push(file.name)
+                files.push(file);
             }
         }
 
@@ -375,7 +375,7 @@ impl<R: Read + Seek> RomFs<R> {
     }
 
     /// Find a file by its path
-    pub fn find_file(&mut self, path: &str) -> Result<FileEntry, Error> {
+    pub fn get_file_by_path(&mut self, path: &str) -> Result<Option<FileEntry>, Error> {
         let mut path_buf = PathBuf::from(path);
         let file_name = path_buf
             .file_name()
@@ -387,11 +387,13 @@ impl<R: Read + Seek> RomFs<R> {
         let parent_path = path_buf.to_string_lossy().to_string();
 
         match self.find_dir(&parent_path) {
-            Ok(parent_offset) => self.find_file_in_dir(parent_offset, &file_name),
-            Err(e) => Err(Error::NotFound(format!(
-                "Could not find parent directory for file '{}': {}",
-                path, e
-            ))),
+            Ok(parent_offset) => match self.find_file_in_dir(parent_offset, &file_name) {
+                Ok(file) => Ok(Some(file)),
+                Err(Error::NotFound(_)) => Ok(None),
+                Err(e) => Err(e),
+            },
+            Err(Error::NotFound(_)) => Ok(None),
+            Err(e) => Err(e),
         }
     }
 
@@ -413,7 +415,7 @@ impl<R: Read + Seek> RomFs<R> {
 
     /// Check if a file exists by path
     pub fn file_exists(&mut self, path: &str) -> bool {
-        self.find_file(path).is_ok()
+        self.get_file_by_path(path).is_ok()
     }
 
     /// Check if a directory exists by path
@@ -421,45 +423,49 @@ impl<R: Read + Seek> RomFs<R> {
         self.find_dir(path).is_ok()
     }
 
-    /// Get the size of a file by path
-    pub fn get_file_size(&mut self, path: &str) -> Result<u64, Error> {
-        let file = self.find_file(path)?;
-        Ok(file.data_size)
-    }
+    // /// Get the size of a file by path
+    // pub fn get_file_size(&mut self, path: &str) -> Result<u64, Error> {
+    //     let file = self.get_file_by_path(path)?;
+    //     Ok(file.data_size)
+    // }
+    /// Read a file from the RomFS to a Vec<u8>
+    pub fn read_to_vec(&mut self, path: &str) -> Result<Option<Vec<u8>>, Error> {
+        let file = self.get_file_by_path(path)?;
 
-    /// Extract a file from the RomFS
-    pub fn extract_file(&mut self, path: &str) -> Result<Vec<u8>, Error> {
-        let file = self.find_file(path)?;
+        match file {
+            Some(file) => {
+                tracing::info!("Extracting file: {} (size: {})", path, file.data_size);
 
-        tracing::info!("Extracting file: {} (size: {})", path, file.data_size);
+                let offset = self.header.file_data_offset + file.data_offset;
+                let size = file.data_size as usize;
 
-        let offset = self.header.file_data_offset + file.data_offset;
-        let size = file.data_size as usize;
+                self.reader.seek(SeekFrom::Start(offset))?;
 
-        self.reader.seek(SeekFrom::Start(offset))?;
+                // Read the file data in chunks to avoid excessive memory usage
+                let mut data = Vec::with_capacity(size);
+                let mut ofs = 0;
+                let chunk_size = 0x800000; // 8MB chunks
 
-        // Read the file data in chunks to avoid excessive memory usage
-        let mut data = Vec::with_capacity(size);
-        let mut ofs = 0;
-        let chunk_size = 0x800000; // 8MB chunks
+                while ofs < size {
+                    let sz = if size - ofs < chunk_size {
+                        size - ofs
+                    } else {
+                        chunk_size
+                    };
 
-        while ofs < size {
-            let sz = if size - ofs < chunk_size {
-                size - ofs
-            } else {
-                chunk_size
-            };
+                    let mut buffer = vec![0u8; sz];
+                    match self.reader.read_exact(&mut buffer) {
+                        Ok(_) => data.extend_from_slice(&buffer),
+                        Err(e) => return Err(Error::Io(e)),
+                    }
+                    ofs += sz;
+                }
 
-            let mut buffer = vec![0u8; sz];
-            match self.reader.read_exact(&mut buffer) {
-                Ok(_) => data.extend_from_slice(&buffer),
-                Err(e) => return Err(Error::Io(e)),
+                tracing::info!("Extraction complete!");
+                Ok(Some(data))
             }
-            ofs += sz;
+            None => Ok(None),
         }
-
-        tracing::info!("Extraction complete!");
-        Ok(data)
     }
 
     /// Open a directory iterator for browsing directories and files
@@ -537,22 +543,13 @@ impl<R: Read + Seek + Clone> VirtualFSExt<R> for RomFs<R> {
     type Entry = FileEntry;
 
     fn list_files(&self) -> Result<Vec<Self::Entry>, Error> {
-        let mut files = Vec::new();
-        // We need to mutably borrow self, so we clone it
-        let mut romfs = self.clone();
-
-        for offset in 0..self.file_hash_table.len() {
-            if let Ok(file) = romfs.read_file_entry(offset as u32) {
-                files.push(file);
-            }
-        }
-        Ok(files)
+        // Call the base implementation directly using fully qualified syntax
+        RomFs::list_files(&mut self.clone())
     }
 
     fn get_file(&self, name: &str) -> Result<Option<Self::Entry>, Error> {
         // We need to mutably borrow self, so we clone it
-        let mut romfs = self.clone();
-        Ok(romfs.find_file(name).ok())
+        RomFs::get_file_by_path(&mut self.clone(), name)
     }
 
     fn create_reader(&mut self, file: &Self::Entry) -> Result<SubFile<R>, Error> {

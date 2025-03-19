@@ -82,7 +82,7 @@ pub struct Hfs0<R: Read + Seek> {
 
 impl<R: Read + Seek> Hfs0<R> {
     /// Create a new HFS0 parser from a reader
-    pub fn new(mut reader: R) -> Result<Self, crate::error::Error> {
+    pub fn from_reader(mut reader: R) -> Result<Self, crate::error::Error> {
         let header = Hfs0Header::read(&mut reader)?;
         Ok(Self { header, reader })
     }
@@ -101,7 +101,7 @@ impl<R: Read + Seek + Clone> Hfs0<R> {
 impl<R: Read + Seek> Hfs0<SharedReader<R>> {
     /// Create a new HFS0 parser from a shared reader
     pub fn from_shared(reader: SharedReader<R>) -> Result<Self, crate::error::Error> {
-        Self::new(reader)
+        Self::from_reader(reader)
     }
 }
 
@@ -142,8 +142,8 @@ impl<R: Read + Seek> Hfs0<R> {
     /// # use std::fs::File;
     /// # use nx_archive::formats::hfs0::Hfs0;
     /// let hfs0_image = File::open("path/to/file.hfs0").unwrap();
-    /// let mut hfs0 = Hfs0::new(hfs0_image).unwrap();
-    /// let file = hfs0.get_files().unwrap();
+    /// let mut hfs0 = Hfs0::from_reader(hfs0_image).unwrap();
+    /// let file = hfs0.list_files().unwrap();
     /// let file = file.first().unwrap();
     /// let mut buffer = vec![0u8; file.size as usize];
     /// hfs0.read_buf(file, &mut buffer).unwrap();
@@ -162,6 +162,7 @@ impl<R: Read + Seek> Hfs0<R> {
         SubFile::new(self.reader.clone(), file.offset, file.offset + file.size)
     }
 
+    /// List all files in the HFS0 archive
     pub fn list_files(&self) -> Result<Vec<Hfs0File>, crate::error::Error> {
         self.header
             .file_entries

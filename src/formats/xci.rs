@@ -15,11 +15,7 @@ use binrw::prelude::*;
 use std::io::{Read, Seek, SeekFrom};
 use tracing::trace;
 
-use crate::{
-    FileEntryExt, TitleDataExt, VirtualFSExt,
-    error::Error,
-    io::SubFile,
-};
+use crate::{FileEntryExt, TitleDataExt, VirtualFSExt, error::Error, io::SubFile};
 
 use super::hfs0::Hfs0;
 
@@ -282,7 +278,7 @@ impl<R: Read + Seek + Clone> VirtualFSExt<R> for Xci<R> {
             hfs0_offset + (self.header.valid_data_end_address as u64 * MEDIA_SIZE),
         );
 
-        let hfs0 = Hfs0::new(subfile)?;
+        let hfs0 = Hfs0::from_reader(subfile)?;
         Ok(hfs0
             .list_files()?
             .into_iter()
@@ -439,8 +435,8 @@ impl<R: Read + Seek> Xci<R> {
             // Don't limit to just header_size - we need access to the full content
             hfs0_offset + (self.header.valid_data_end_address as u64 * MEDIA_SIZE),
         );
-        let hfs0 =
-            Hfs0::new(subfile).map_err(|e| Error::Other(format!("Failed to parse HFS0: {}", e)))?;
+        let hfs0 = Hfs0::from_reader(subfile)
+            .map_err(|e| Error::Other(format!("Failed to parse HFS0: {}", e)))?;
 
         trace!("HFS0 header read successfully");
 
@@ -465,7 +461,7 @@ impl<R: Read + Seek> Xci<R> {
             let start_offset = hfs0_offset + file.offset;
             let end_offset = start_offset + file.size;
 
-            let part = Hfs0::new(SubFile::new(&mut self.reader, start_offset, end_offset))
+            let part = Hfs0::from_reader(SubFile::new(&mut self.reader, start_offset, end_offset))
                 .map_err(|e| {
                     Error::Other(format!(
                         "Failed to parse HFS0 partition {}: {}",
@@ -527,8 +523,8 @@ impl<R: Read + Seek> TitleDataExt for Xci<R> {
                     // for each file
                     let files = pfs0.list_files()?;
                     for file in files {
-                        if file.ends_with(".cnmt") {
-                            let file = pfs0.read_file(&file)?;
+                        if file.name.ends_with(".cnmt") {
+                            let file = pfs0.read_to_vec(&file)?;
                             let mut cursor = std::io::Cursor::new(file);
                             let cnmt = crate::formats::cnmt::Cnmt::from_reader(&mut cursor)?;
                             cnmts.push(cnmt);
