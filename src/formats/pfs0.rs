@@ -15,7 +15,7 @@ use std::io::{Read, Seek, SeekFrom};
 
 use binrw::prelude::*;
 
-use crate::io::SubFile;
+use crate::{TitleDataExt, io::SubFile};
 
 // Type alias for NSP (Nintendo Submission Package), which are simply just
 // PFS0 images
@@ -267,9 +267,62 @@ impl<R: Read + Seek> Pfs0<R> {
         Ok(files)
     }
 
-
     pub fn file_count(&self) -> usize {
         self.files.len()
+    }
+}
+
+impl<R: Read + Seek> TitleDataExt for Pfs0<R> {
+    fn get_cnmts(
+        &mut self,
+        keyset: &crate::formats::Keyset,
+        title_keyset: Option<&crate::formats::TitleKeys>,
+    ) -> Result<Vec<crate::formats::cnmt::Cnmt>, crate::error::Error> {
+        let mut cnmts = Vec::new();
+
+        // Collect filenames first to avoid borrowing conflict
+        let cnmt_ncas: Vec<String> = self
+            .files
+            .iter()
+            .filter(|file| file.name.ends_with(".cnmt.nca"))
+            .map(|file| file.name.clone())
+            .collect();
+
+        // Now we can process each file
+        for filename in cnmt_ncas {
+            let data = self.read_file(&filename)?;
+            let mut nca = crate::formats::nca::Nca::from_reader(
+                std::io::Cursor::new(data),
+                keyset,
+                title_keyset,
+            )?;
+            let mut pfs0 = nca.open_pfs0_filesystem(0)?;
+            for file in pfs0.list_files()? {
+                if file.ends_with(".cnmt") {
+                    let data = pfs0.read_file(&file)?;
+                    let cnmt =
+                        crate::formats::cnmt::Cnmt::from_reader(&mut std::io::Cursor::new(data))?;
+                    cnmts.push(cnmt);
+                }
+            }
+        }
+
+        Ok(cnmts)
+    }
+
+    fn title_id(&self) -> Result<u64, crate::error::Error> {
+        let cnmt = self
+            .files
+            .iter()
+            .find(|f| f.name.ends_with(".cnmt.nca"))
+            .ok_or(crate::error::Error::NotFound(
+                "CNMT file not found".to_string(),
+            ))?;
+
+        let title_id = u64::from_str_radix(&cnmt.name[..16], 16)
+            .map_err(|e| crate::error::Error::NotFound(e.to_string()))?;
+
+        Ok(title_id)
     }
 }
 
