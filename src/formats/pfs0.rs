@@ -15,7 +15,10 @@ use std::io::{Read, Seek, SeekFrom};
 
 use binrw::prelude::*;
 
-use crate::{FileEntryExt, TitleDataExt, VirtualFSExt, io::SubFile};
+use crate::{
+    FileEntryExt, TitleDataExt, VirtualFSExt,
+    io::{ReaderExt, SharedReader, SubFile},
+};
 
 // Type alias for NSP (Nintendo Submission Package), which are simply just
 // PFS0 images
@@ -132,17 +135,7 @@ pub struct Pfs0<R: Read + Seek> {
 
 impl<R: Read + Seek> Pfs0<R> {
     /// Create a new PFS0 parser from a reader
-    ///
-    /// # Arguments
-    /// * `reader` - Any source that implements Read + Seek
-    ///
-    /// # Returns
-    /// * `Result<Self, Box<dyn std::error::Error>>` - A parsed PFS0 structure or an error
-    ///
-    /// # Notes
-    /// - The magic "PFS0" is automatically validated by binrw
-    /// - This function reads the header, all file entries, and the string table
-    pub fn new(mut reader: R) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn new(mut reader: R) -> Result<Self, crate::error::Error> {
         let header: Pfs0Header = reader.read_le()?;
         // Magic validation is handled by binrw via the magic attribute
         println!("PFS0 Header: {:?}", header);
@@ -174,80 +167,7 @@ impl<R: Read + Seek> Pfs0<R> {
         })
     }
 
-    /// Extract a file from the PFS0 archive by its path/name
-    ///
-    /// # Arguments
-    /// * `vpath` - The filename to extract
-    ///
-    /// # Returns
-    /// * `Result<Vec<u8>, crate::error::Error>` - The file contents or an error
-    pub fn read_file(&mut self, vpath: &str) -> Result<Vec<u8>, crate::error::Error> {
-        let file = self
-            .get_file(vpath)
-            .ok_or_else(|| crate::error::Error::NotFound(format!("File not found: {}", vpath)))?;
-        let mut data = vec![0; file.size as usize];
-        self.read_buf(&file, &mut data)?;
-        Ok(data)
-    }
-
-    /// Read file data from the PFS0 archive into a provided buffer
-    ///
-    /// # Arguments
-    /// * `file` - The PFS0 file entry containing offset and size information
-    /// * `buf` - The pre-allocated buffer to read the file data into. Must be large enough to hold the entire file.
-    ///
-    /// # Returns
-    /// * `Result<(), crate::error::Error>` - Ok(()) on successful read, Error if read fails
-    ///
-    /// # Errors
-    /// * `std::io::Error` - If reading from the underlying reader fails
-    ///
-    /// # Implementation Details
-    /// - Reads file data in 8MB chunks to avoid excessive memory usage
-    /// - File offset calculation accounts for:
-    ///   - PFS0 header (0x10 bytes)
-    ///   - File entries (0x18 bytes each)
-    ///   - String table size
-    pub fn read_buf(&mut self, file: &Pfs0File, buf: &mut [u8]) -> Result<(), crate::error::Error> {
-        // Calculate actual file offset in the container
-        // This is: header (0x10) + all entries (0x18 * num_files) + string table size
-        let files_start_offset =
-            0x10 + (0x18 * self.header.num_files as u64) + (self.header.str_table_offset as u64);
-        let offset = files_start_offset + file.data_offset;
-
-        tracing::trace!(
-            offset = format!("{:012X}", offset),
-            actual_offset = format!("{:012X}", offset + file.size),
-            "Dumping included file"
-        );
-
-        self.reader.seek(SeekFrom::Start(offset))?;
-
-        // Read the file data in chunks to avoid excessive memory usage
-        let mut ofs = 0;
-        let chunk_size = 0x800000; // 8MB chunks
-        let size = file.size as usize;
-
-        while ofs < size {
-            let sz = if size - ofs < chunk_size {
-                size - ofs
-            } else {
-                chunk_size
-            };
-
-            self.reader.read_exact(&mut buf[ofs..ofs + sz])?;
-            ofs += sz;
-        }
-        Ok(())
-    }
-
     /// Get a file entry by its path/name
-    ///
-    /// # Arguments
-    /// * `path` - The filename to find
-    ///
-    /// # Returns
-    /// * `Option<Pfs0File>` - The file entry if found, None otherwise
     pub fn get_file(&self, path: &str) -> Option<Pfs0File> {
         self.files
             .iter()
@@ -271,16 +191,6 @@ impl<R: Read + Seek> Pfs0<R> {
             .collect()
     }
 
-    pub fn subfile(&mut self, file: &Pfs0File) -> SubFile<R>
-    where
-        R: Clone,
-    {
-        let files_start_offset =
-            0x10 + (0x18 * self.header.num_files as u64) + (self.header.str_table_offset as u64);
-        let offset = files_start_offset + file.data_offset;
-        SubFile::new(self.reader.clone(), offset, offset + file.size)
-    }
-
     pub fn list_files(&self) -> Result<Vec<String>, crate::error::Error> {
         let files = self.files.iter().map(|f| f.name.clone()).collect();
         Ok(files)
@@ -289,9 +199,55 @@ impl<R: Read + Seek> Pfs0<R> {
     pub fn file_count(&self) -> usize {
         self.files.len()
     }
+
+    /// Extract a file from the PFS0 archive by its path/name
+    pub fn read_file(&mut self, vpath: &str) -> Result<Vec<u8>, crate::error::Error> {
+        let file = self
+            .get_file(vpath)
+            .ok_or_else(|| crate::error::Error::NotFound(format!("File not found: {}", vpath)))?;
+        let mut data = vec![0; file.size as usize];
+        self.read_buf(&file, &mut data)?;
+        Ok(data)
+    }
+
+    /// Read file data from the PFS0 archive into a provided buffer
+    pub fn read_buf(&mut self, file: &Pfs0File, buf: &mut [u8]) -> Result<(), crate::error::Error> {
+        let files_start_offset =
+            0x10 + (0x18 * self.header.num_files as u64) + (self.header.str_table_offset as u64);
+        let offset = files_start_offset + file.data_offset;
+
+        self.reader.seek(SeekFrom::Start(offset))?;
+        self.reader.read_exact(buf)?;
+        Ok(())
+    }
 }
 
-impl<R: Read + Seek> TitleDataExt for Pfs0<R> {
+impl<R: Read + Seek + Clone> Pfs0<R> {
+    /// Convert this PFS0 to use a shared reader
+    pub fn into_shared(self) -> Result<Pfs0<SharedReader<R>>, crate::error::Error> {
+        Ok(Pfs0 {
+            reader: SharedReader::new(self.reader),
+            header: self.header,
+            files: self.files,
+        })
+    }
+
+    pub fn subfile(&mut self, file: &Pfs0File) -> SubFile<R> {
+        let files_start_offset =
+            0x10 + (0x18 * self.header.num_files as u64) + (self.header.str_table_offset as u64);
+        let offset = files_start_offset + file.data_offset;
+        SubFile::new(self.reader.clone(), offset, offset + file.size)
+    }
+}
+
+impl<R: Read + Seek> Pfs0<SharedReader<R>> {
+    /// Create a new PFS0 parser from a shared reader
+    pub fn from_shared(reader: SharedReader<R>) -> Result<Self, crate::error::Error> {
+        Self::new(reader)
+    }
+}
+
+impl<R: Read + Seek + Clone> TitleDataExt for Pfs0<R> {
     fn get_cnmts(
         &mut self,
         keyset: &crate::formats::Keyset,

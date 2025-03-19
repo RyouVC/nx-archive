@@ -1,45 +1,13 @@
+use crate::{
+    FileEntryExt, VirtualFSExt,
+    error::Error,
+    io::{ReaderExt, SharedReader, SubFile},
+};
 use binrw::prelude::*;
 use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-
-use crate::io::SubFile;
-use crate::{FileEntryExt, VirtualFSExt};
-
-/// Custom error type for RomFS operations
-#[derive(Debug, thiserror::Error)]
-pub enum RomFsError {
-    #[error("Invalid RomFS header: {0}")]
-    InvalidHeader(String),
-
-    #[error("Failed to read RomFS: {0}")]
-    IoError(#[from] std::io::Error),
-
-    #[error("Failed to parse data: {0}")]
-    ParseError(#[from] binrw::Error),
-
-    #[error("File not found: {0}")]
-    FileNotFound(String),
-
-    #[error("Directory not found: {0}")]
-    DirNotFound(String),
-
-    #[error("Invalid path: {0}")]
-    InvalidPath(String),
-
-    #[error("UTF-8 error: {0}")]
-    Utf8Error(#[from] std::string::FromUtf8Error),
-
-    #[error("Other error: {0}")]
-    Other(String),
-}
-
-// impl From<RomFsError> for Box<dyn std::error::Error> {
-//     fn from(err: RomFsError) -> Self {
-//         Box::new(err)
-//     }
-// }
 
 /// RomFS header structure
 #[binrw]
@@ -93,7 +61,7 @@ pub struct RomFsDirectoryIterator<R: Read + Seek> {
 
 impl<R: Read + Seek> RomFsDirectoryIterator<R> {
     /// Returns the next directory name or None if there are no more directories
-    pub fn next_dir(&mut self) -> Option<Result<String, Box<dyn std::error::Error>>> {
+    pub fn next_dir(&mut self) -> Option<Result<String, Error>> {
         if self.current_dir_index >= self.dir_offsets.len() {
             return None;
         }
@@ -109,7 +77,7 @@ impl<R: Read + Seek> RomFsDirectoryIterator<R> {
     }
 
     /// Returns the next file name and size or None if there are no more files
-    pub fn next_file(&mut self) -> Option<Result<(String, u64), Box<dyn std::error::Error>>> {
+    pub fn next_file(&mut self) -> Option<Result<(String, u64), Error>> {
         if self.current_file_index >= self.file_offsets.len() {
             return None;
         }
@@ -162,8 +130,8 @@ impl<R: Read + Seek> RomFs<R> {
     /// Maximum reasonable table size (to prevent excessive allocations)
     const MAX_REASONABLE_TABLE_SIZE: u32 = 0x10000000; // 256MB
 
-    /// Create a new RomFS reader from a reader
-    pub fn new(mut reader: R) -> Result<Self, Box<dyn std::error::Error>> {
+    /// Create a new RomFS parser from a reader
+    pub fn new(mut reader: R) -> Result<Self, Error> {
         // Read and dump the first 64 bytes for debugging
         let mut preview = [0u8; 64];
         let reader_clone = &mut reader;
@@ -181,11 +149,10 @@ impl<R: Read + Seek> RomFs<R> {
         let header: RomFsHeader = match reader.read_le() {
             Ok(h) => h,
             Err(e) => {
-                return Err(RomFsError::InvalidHeader(format!(
+                return Err(Error::InvalidData(format!(
                     "Failed to parse RomFS header: {}",
                     e
-                ))
-                .into());
+                )));
             }
         };
 
@@ -205,38 +172,35 @@ impl<R: Read + Seek> RomFs<R> {
 
         // Validate header values to avoid security issues with large allocations
         if header.header_size == 0 || header.header_size > Self::MAX_REASONABLE_HEADER_SIZE {
-            return Err(RomFsError::InvalidHeader(format!(
+            return Err(Error::InvalidData(format!(
                 "Invalid header size: {}",
                 header.header_size
-            ))
-            .into());
+            )));
         }
 
         if header.dir_hash_table_size > Self::MAX_REASONABLE_TABLE_SIZE {
-            return Err(RomFsError::InvalidHeader(format!(
+            return Err(Error::InvalidData(format!(
                 "Dir hash table too large: {}",
                 header.dir_hash_table_size
-            ))
-            .into());
+            )));
         }
 
         if header.file_hash_table_size > Self::MAX_REASONABLE_TABLE_SIZE {
-            return Err(RomFsError::InvalidHeader(format!(
+            return Err(Error::InvalidData(format!(
                 "File hash table too large: {}",
                 header.file_hash_table_size
-            ))
-            .into());
+            )));
         }
 
         // Validate hash table offsets are within reasonable bounds
         if header.dir_hash_table_offset == 0 {
-            return Err(
-                RomFsError::InvalidHeader("Directory hash table offset is 0".into()).into(),
-            );
+            return Err(Error::InvalidData(
+                "Directory hash table offset is 0".into(),
+            ));
         }
 
         if header.file_hash_table_offset == 0 {
-            return Err(RomFsError::InvalidHeader("File hash table offset is 0".into()).into());
+            return Err(Error::InvalidData("File hash table offset is 0".into()));
         }
 
         // Read the directory hash table
@@ -252,7 +216,7 @@ impl<R: Read + Seek> RomFs<R> {
         for entry in dir_hash_table.iter_mut() {
             match reader.read_le() {
                 Ok(hash) => *entry = hash,
-                Err(e) => return Err(RomFsError::ParseError(e).into()),
+                Err(e) => return Err(Error::BinaryParser(e)),
             }
         }
 
@@ -266,7 +230,7 @@ impl<R: Read + Seek> RomFs<R> {
         for entry in file_hash_table.iter_mut() {
             match reader.read_le() {
                 Ok(hash) => *entry = hash,
-                Err(e) => return Err(RomFsError::ParseError(e).into()),
+                Err(e) => return Err(Error::BinaryParser(e)),
             }
         }
 
@@ -290,7 +254,7 @@ impl<R: Read + Seek> RomFs<R> {
         hash % (table_size as u32)
     }
 
-    pub fn list_files(&mut self) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    pub fn list_files(&mut self) -> Result<Vec<String>, Error> {
         let mut files = Vec::new();
 
         for offset in 0..self.file_hash_table.len() {
@@ -303,10 +267,7 @@ impl<R: Read + Seek> RomFs<R> {
     }
 
     /// Read a directory entry from the directory table
-    fn read_dir_entry(
-        &mut self,
-        offset: u32,
-    ) -> Result<DirectoryEntry, Box<dyn std::error::Error>> {
+    fn read_dir_entry(&mut self, offset: u32) -> Result<DirectoryEntry, Error> {
         // Check the cache first
         if let Some(entry) = self.cache_dir_entries.get(&offset) {
             return Ok(entry.clone());
@@ -328,7 +289,7 @@ impl<R: Read + Seek> RomFs<R> {
         let mut name_bytes = vec![0u8; name_size as usize];
         reader.read_exact(&mut name_bytes)?;
 
-        let name = String::from_utf8(name_bytes)?;
+        let name = String::from_utf8(name_bytes).map_err(|e| Error::InvalidData(e.to_string()))?;
 
         Ok(DirectoryEntry {
             parent_offset,
@@ -342,7 +303,7 @@ impl<R: Read + Seek> RomFs<R> {
     }
 
     /// Read a file entry from the file table
-    fn read_file_entry(&mut self, offset: u32) -> Result<FileEntry, Box<dyn std::error::Error>> {
+    fn read_file_entry(&mut self, offset: u32) -> Result<FileEntry, Error> {
         // Check the cache first
         if let Some(entry) = self.cache_file_entries.get(&offset) {
             return Ok(entry.clone());
@@ -364,7 +325,7 @@ impl<R: Read + Seek> RomFs<R> {
         let mut name_bytes = vec![0u8; name_size as usize];
         reader.read_exact(&mut name_bytes)?;
 
-        let name = String::from_utf8(name_bytes)?;
+        let name = String::from_utf8(name_bytes).map_err(|e| Error::InvalidData(e.to_string()))?;
 
         Ok(FileEntry {
             parent_offset,
@@ -378,7 +339,7 @@ impl<R: Read + Seek> RomFs<R> {
     }
 
     /// Find a directory by its path
-    pub fn find_dir(&mut self, path: &str) -> Result<u32, Box<dyn std::error::Error>> {
+    pub fn find_dir(&mut self, path: &str) -> Result<u32, Error> {
         let path_parts: Vec<_> = path.split('/').filter(|p| !p.is_empty()).collect();
 
         let mut current_dir = Self::ROOT_DIR_OFFSET;
@@ -386,11 +347,10 @@ impl<R: Read + Seek> RomFs<R> {
             match self.find_dir_in_parent(current_dir, part) {
                 Ok(dir) => current_dir = dir,
                 Err(e) => {
-                    return Err(RomFsError::DirNotFound(format!(
+                    return Err(Error::NotFound(format!(
                         "Could not find directory '{}': {}",
                         part, e
-                    ))
-                    .into());
+                    )));
                 }
             }
         }
@@ -399,11 +359,7 @@ impl<R: Read + Seek> RomFs<R> {
     }
 
     /// Find a directory within a parent directory by name
-    fn find_dir_in_parent(
-        &mut self,
-        parent_offset: u32,
-        name: &str,
-    ) -> Result<u32, Box<dyn std::error::Error>> {
+    fn find_dir_in_parent(&mut self, parent_offset: u32, name: &str) -> Result<u32, Error> {
         let hash = self.compute_hash(parent_offset, name.as_bytes(), self.dir_hash_table.len());
 
         let mut current_offset = self.dir_hash_table[hash as usize];
@@ -415,15 +371,15 @@ impl<R: Read + Seek> RomFs<R> {
             current_offset = entry.hash_sibling_offset;
         }
 
-        Err("Directory not found".into())
+        Err(Error::NotFound("Directory not found".into()))
     }
 
     /// Find a file by its path
-    pub fn find_file(&mut self, path: &str) -> Result<FileEntry, Box<dyn std::error::Error>> {
+    pub fn find_file(&mut self, path: &str) -> Result<FileEntry, Error> {
         let mut path_buf = PathBuf::from(path);
         let file_name = path_buf
             .file_name()
-            .ok_or_else(|| RomFsError::InvalidPath(format!("Invalid path: {}", path)))?
+            .ok_or_else(|| Error::InvalidData(format!("Invalid path: {}", path)))?
             .to_string_lossy()
             .to_string();
 
@@ -432,20 +388,15 @@ impl<R: Read + Seek> RomFs<R> {
 
         match self.find_dir(&parent_path) {
             Ok(parent_offset) => self.find_file_in_dir(parent_offset, &file_name),
-            Err(e) => Err(RomFsError::FileNotFound(format!(
+            Err(e) => Err(Error::NotFound(format!(
                 "Could not find parent directory for file '{}': {}",
                 path, e
-            ))
-            .into()),
+            ))),
         }
     }
 
     /// Find a file within a parent directory by name
-    fn find_file_in_dir(
-        &mut self,
-        parent_offset: u32,
-        name: &str,
-    ) -> Result<FileEntry, Box<dyn std::error::Error>> {
+    fn find_file_in_dir(&mut self, parent_offset: u32, name: &str) -> Result<FileEntry, Error> {
         let hash = self.compute_hash(parent_offset, name.as_bytes(), self.file_hash_table.len());
 
         let mut current_offset = self.file_hash_table[hash as usize];
@@ -457,7 +408,7 @@ impl<R: Read + Seek> RomFs<R> {
             current_offset = entry.hash_sibling_offset;
         }
 
-        Err("File not found".into())
+        Err(Error::NotFound("File not found".into()))
     }
 
     /// Check if a file exists by path
@@ -471,13 +422,13 @@ impl<R: Read + Seek> RomFs<R> {
     }
 
     /// Get the size of a file by path
-    pub fn get_file_size(&mut self, path: &str) -> Result<u64, Box<dyn std::error::Error>> {
+    pub fn get_file_size(&mut self, path: &str) -> Result<u64, Error> {
         let file = self.find_file(path)?;
         Ok(file.data_size)
     }
 
     /// Extract a file from the RomFS
-    pub fn extract_file(&mut self, path: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    pub fn extract_file(&mut self, path: &str) -> Result<Vec<u8>, Error> {
         let file = self.find_file(path)?;
 
         tracing::info!("Extracting file: {} (size: {})", path, file.data_size);
@@ -502,7 +453,7 @@ impl<R: Read + Seek> RomFs<R> {
             let mut buffer = vec![0u8; sz];
             match self.reader.read_exact(&mut buffer) {
                 Ok(_) => data.extend_from_slice(&buffer),
-                Err(e) => return Err(RomFsError::IoError(e).into()),
+                Err(e) => return Err(Error::Io(e)),
             }
             ofs += sz;
         }
@@ -512,10 +463,7 @@ impl<R: Read + Seek> RomFs<R> {
     }
 
     /// Open a directory iterator for browsing directories and files
-    pub fn open_dir(
-        &mut self,
-        path: &str,
-    ) -> Result<RomFsDirectoryIterator<R>, Box<dyn std::error::Error>>
+    pub fn open_dir(&mut self, path: &str) -> Result<RomFsDirectoryIterator<R>, Error>
     where
         Self: Clone,
         R: Clone,
@@ -548,6 +496,27 @@ impl<R: Read + Seek> RomFs<R> {
             current_dir_index: 0,
             current_file_index: 0,
         })
+    }
+}
+
+impl<R: Read + Seek + Clone> RomFs<R> {
+    /// Convert this RomFS to use a shared reader
+    pub fn into_shared(self) -> Result<RomFs<SharedReader<R>>, Error> {
+        Ok(RomFs {
+            reader: SharedReader::new(self.reader),
+            header: self.header,
+            dir_hash_table: self.dir_hash_table,
+            file_hash_table: self.file_hash_table,
+            cache_dir_entries: self.cache_dir_entries,
+            cache_file_entries: self.cache_file_entries,
+        })
+    }
+}
+
+impl<R: Read + Seek> RomFs<SharedReader<R>> {
+    /// Create a new RomFS parser from a shared reader
+    pub fn from_shared(reader: SharedReader<R>) -> Result<Self, Error> {
+        Self::new(reader)
     }
 }
 
@@ -586,7 +555,7 @@ impl<R: Read + Seek + Clone> VirtualFSExt<R> for RomFs<R> {
         romfs.find_file(name).ok()
     }
 
-    fn create_reader(&mut self, file: &Self::Entry) -> Result<SubFile<R>, crate::error::Error> {
+    fn create_reader(&mut self, file: &Self::Entry) -> Result<SubFile<R>, Error> {
         let offset = self.header.file_data_offset + file.data_offset;
         Ok(SubFile::new(
             self.reader.clone(),
@@ -599,11 +568,11 @@ impl<R: Read + Seek + Clone> VirtualFSExt<R> for RomFs<R> {
 impl<R: Read + Seek + Clone> FileEntryExt<R> for FileEntry {
     type FS = RomFs<R>;
 
-    fn file_reader(&self, fs: &mut Self::FS) -> Result<SubFile<R>, crate::error::Error> {
+    fn file_reader(&self, fs: &mut Self::FS) -> Result<SubFile<R>, Error> {
         fs.create_reader(self)
     }
 
-    fn read_bytes(&self, fs: &mut Self::FS, size: usize) -> Result<Vec<u8>, crate::error::Error> {
+    fn read_bytes(&self, fs: &mut Self::FS, size: usize) -> Result<Vec<u8>, Error> {
         let mut buf = vec![0; size];
         let mut reader = self.file_reader(fs)?;
         reader.read_exact(&mut buf)?;

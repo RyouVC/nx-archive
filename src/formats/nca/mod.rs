@@ -125,12 +125,17 @@ impl NcaVersion {
     }
 
     /// Create from a number, getting the character representation and then turning that into a NcaVersion
-    pub fn from_num(value: usize) -> Result<Self, &'static str> {
+    pub fn from_num(value: usize) -> Result<Self, crate::error::Error> {
         format!("{}", value)
             .chars()
             .next()
             .map(Self::from_char)
-            .ok_or("Failed to convert number to NcaVersion: cannot represent as UTF-8 character")
+            .ok_or_else(|| {
+                crate::error::Error::InvalidData(
+                    "Failed to convert number to NcaVersion: cannot represent as UTF-8 character"
+                        .to_string(),
+                )
+            })
     }
 }
 
@@ -221,7 +226,7 @@ impl NcaHeader {
     /// This will take only what is needed for the header, which is the first 0x340 bytes, and parse it.
     ///
     /// Note: If you would like to decrypt the header first, please use the `to_bytes_encrypt` method.
-    pub fn from_reader<R: Read + Seek>(reader: &mut R) -> Result<Self, binrw::Error> {
+    pub fn from_reader<R: Read + Seek>(reader: &mut R) -> Result<Self, crate::error::Error> {
         let mut decrypted = vec![0; 0x340];
         reader.read_exact(&mut decrypted)?;
         let header: NcaHeader = binrw::io::Cursor::new(&decrypted).read_le()?;
@@ -229,7 +234,7 @@ impl NcaHeader {
     }
 
     /// Parses an NCA header from a byte slice (0x340 bytes) of an already-decrypted header
-    pub fn from_bytes(bytes: &[u8; 0x340]) -> Result<Self, binrw::Error> {
+    pub fn from_bytes(bytes: &[u8; 0x340]) -> Result<Self, crate::error::Error> {
         let header: NcaHeader = binrw::io::Cursor::new(bytes).read_le()?;
         Ok(header)
     }
@@ -805,17 +810,22 @@ impl<R: Read + Seek> Nca<R> {
     pub fn open_romfs_filesystem(
         &mut self,
         idx: usize,
-    ) -> Result<RomFs<Box<dyn ReadSeek + '_>>, Box<dyn std::error::Error>> {
+    ) -> Result<RomFs<Box<dyn ReadSeek + '_>>, crate::error::Error> {
         tracing::trace!(idx, "Opening RomFS filesystem");
 
         // Let's do some checks first to make sure we can open the RomFS
         if idx >= self.fs_headers.len() {
-            return Err("Invalid filesystem index".into());
+            return Err(crate::error::Error::InvalidState(
+                "Invalid filesystem index".to_string(),
+            ));
         }
 
         let fs_header = &self.fs_headers[idx];
         if fs_header.fs_type != FsType::RomFs {
-            return Err(format!("Invalid filesystem type: {:?}", fs_header.fs_type).into());
+            return Err(crate::error::Error::InvalidState(format!(
+                "Invalid filesystem type: {:?}",
+                fs_header.fs_type
+            )));
         }
 
         // Prepare a reader for the RomFS filesystem
@@ -824,37 +834,14 @@ impl<R: Read + Seek> Nca<R> {
         // Attempt to open the RomFS
         tracing::trace!("Attempting to open RomFS");
 
-        match RomFs::new(reader) {
-            Ok(mut romfs) => {
-                // List the files if available
-                if let Ok(files) = romfs.list_files() {
-                    tracing::trace!(files = ?files, "RomFS opened successfully");
-                } else {
-                    tracing::trace!("RomFS opened successfully but file listing failed");
-                }
-                Ok(romfs)
-            }
-            Err(e) => {
-                tracing::trace!(error = %e, "Failed to open RomFS");
-                Err(e)
-            }
-        }
+        RomFs::new(reader)
     }
-    pub fn decrypt_and_dump_fs(
-        &mut self,
-        idx: usize,
-    ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    pub fn decrypt_and_dump_fs(&mut self, idx: usize) -> Result<Vec<u8>, crate::error::Error> {
         tracing::trace!("Decrypting and dumping filesystem {}", idx);
         let mut reader = self.prepare_fs_reader(idx)?;
-        let mut buffer = Vec::new();
-
-        // read the first 100
-        for _ in 0..100 {
-            let mut buf = [0u8; 1];
-            reader.read_exact(&mut buf)?;
-            buffer.push(buf[0]);
-        }
-        Ok(buffer)
+        let mut data = Vec::new();
+        reader.read_to_end(&mut data)?;
+        Ok(data)
     }
 }
 

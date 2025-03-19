@@ -40,12 +40,22 @@ impl<R: Read + Seek> Clone for SharedReader<R> {
     }
 }
 
-impl<R: Read + Seek> SharedReader<R> {
-    /// Create a new SharedReader
+impl<R: Read + Seek + Clone> SharedReader<R> {
+    /// Create a new shared reader from a regular reader
     pub fn new(reader: R) -> Self {
         Self {
             inner: Arc::new(Mutex::new(reader)),
         }
+    }
+
+    /// Create a new shared reader from an existing reader
+    pub fn from_reader(reader: R) -> Self {
+        Self::new(reader)
+    }
+
+    /// Create a new shared reader from an existing shared reader
+    pub fn from_shared(reader: SharedReader<R>) -> Self {
+        reader
     }
 
     /// Create a SubFile from this shared reader
@@ -101,6 +111,28 @@ impl<R: Read + Seek> SubFile<R> {
 
     pub fn size(&self) -> u64 {
         self.end - self.start
+    }
+
+    /// Convert this SubFile into one that uses a shared reader
+    pub fn shared(self) -> SubFile<SharedReader<R>>
+    where
+        R: Clone,
+    {
+        SubFile::new(SharedReader::new(self.reader), self.start, self.end)
+    }
+
+    /// Create a new subfile from this one
+    pub fn subfile(&self, relative_start: u64, relative_end: u64) -> SubFile<R>
+    where
+        R: Clone,
+    {
+        let absolute_start = self.start + relative_start;
+        let absolute_end = self.start + relative_end;
+        assert!(
+            absolute_end <= self.end,
+            "Subfile range exceeds parent bounds"
+        );
+        SubFile::new(self.reader.clone(), absolute_start, absolute_end)
     }
 }
 
@@ -236,6 +268,16 @@ impl<R: Read + Seek> Seek for Aes128CtrReader<R> {
         self.base_reader.seek(SeekFrom::Start(self.offset))
     }
 }
+
+/// Extension trait for readers to easily convert them to shared readers
+pub trait ReaderExt: Read + Seek + Clone + Sized {
+    /// Convert this reader into a shared reader
+    fn into_shared(self) -> SharedReader<Self> {
+        SharedReader::new(self)
+    }
+}
+
+impl<R: Read + Seek + Clone> ReaderExt for R {}
 
 #[cfg(test)]
 mod tests {

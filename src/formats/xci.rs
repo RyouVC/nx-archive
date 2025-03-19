@@ -15,7 +15,11 @@ use binrw::prelude::*;
 use std::io::{Read, Seek, SeekFrom};
 use tracing::trace;
 
-use crate::{TitleDataExt, io::SubFile};
+use crate::{
+    FileEntryExt, TitleDataExt, VirtualFSExt,
+    error::Error,
+    io::{ReaderExt, SharedReader, SubFile},
+};
 
 use super::hfs0::Hfs0;
 
@@ -253,9 +257,84 @@ pub struct KeyArea {
     pub title_key2: [u8; 0x8],
 }
 
+/// A partition entry in an XCI file
+#[derive(Debug, Clone)]
+pub struct XciPartition {
+    pub name: String,
+    pub offset: u64,
+    pub size: u64,
+}
+
+impl<R: Read + Seek + Clone> VirtualFSExt<R> for Xci<R> {
+    type Entry = XciPartition;
+
+    fn list_files(&self) -> Vec<Self::Entry> {
+        // We need to list the HFS0 partitions, but we can't borrow self as mutable
+        // So we'll clone the reader and create a new instance
+        let mut reader = self.reader.clone();
+        let hfs0_offset = self.get_hfs0_offset();
+        reader.seek(SeekFrom::Start(hfs0_offset)).ok();
+
+        // Create a SubFile that covers the entire rest of the XCI file
+        let subfile = SubFile::new(
+            &mut reader,
+            hfs0_offset,
+            hfs0_offset + (self.header.valid_data_end_address as u64 * MEDIA_SIZE),
+        );
+
+        if let Ok(hfs0) = Hfs0::new(subfile) {
+            hfs0.get_files()
+                .into_iter()
+                .map(|file| XciPartition {
+                    name: file.name,
+                    offset: hfs0_offset + file.offset,
+                    size: file.size,
+                })
+                .collect()
+        } else {
+            Vec::new()
+        }
+    }
+
+    fn get_file(&self, name: &str) -> Option<Self::Entry> {
+        self.list_files().into_iter().find(|f| f.name == name)
+    }
+
+    fn create_reader(&mut self, file: &Self::Entry) -> Result<SubFile<R>, Error> {
+        Ok(SubFile::new(
+            self.reader.clone(),
+            file.offset,
+            file.offset + file.size,
+        ))
+    }
+}
+
+impl<R: Read + Seek + Clone> FileEntryExt<R> for XciPartition {
+    type FS = Xci<R>;
+
+    fn file_reader(&self, fs: &mut Xci<R>) -> Result<SubFile<R>, Error> {
+        fs.create_reader(self)
+    }
+
+    fn file_size(&self) -> u64 {
+        self.size
+    }
+
+    fn file_name(&self) -> String {
+        self.name.clone()
+    }
+
+    fn read_bytes(&self, fs: &mut Xci<R>, size: usize) -> Result<Vec<u8>, Error> {
+        let mut buf = vec![0; size];
+        let mut reader = self.file_reader(fs)?;
+        reader.read_exact(&mut buf).map_err(Error::from)?;
+        Ok(buf)
+    }
+}
+
 impl<R: Read + Seek> Xci<R> {
     /// Creates a new XCI instance from a reader
-    pub fn new(mut reader: R) -> binrw::BinResult<Self> {
+    pub fn new(mut reader: R) -> Result<Self, Error> {
         // Check if this is a "full" XCI
         // (full XCIs contain a 0x1000 key area, usually)
         // unreadable directly in most r/w operations
@@ -263,9 +342,9 @@ impl<R: Read + Seek> Xci<R> {
             trace!("Checking if this is a full XCI");
             // Read at 0x100 first, we're checking for a trimmed XCI
             // trimmed XCIs will have a header at 0x100
-            reader.seek(SeekFrom::Start(0x100))?;
+            reader.seek(SeekFrom::Start(0x100)).map_err(Error::from)?;
             let mut magic = [0u8; 4];
-            reader.read_exact(&mut magic)?;
+            reader.read_exact(&mut magic).map_err(Error::from)?;
             let at_0x100 = b"HEAD"[..] == magic[..];
             trace!("Found magic at 0x100?: {}", at_0x100);
 
@@ -275,8 +354,8 @@ impl<R: Read + Seek> Xci<R> {
             } else {
                 // Let's go to 0x200
                 // full XCIs will have a 0x1000 key area before the XciHeader
-                reader.seek(SeekFrom::Start(0x1100))?;
-                reader.read_exact(&mut magic)?;
+                reader.seek(SeekFrom::Start(0x1100)).map_err(Error::from)?;
+                reader.read_exact(&mut magic).map_err(Error::from)?;
                 let at_0x1100 = b"HEAD"[..] == magic[..];
                 trace!("Found magic at 0x1100?: {}", at_0x1100);
                 at_0x1100
@@ -286,8 +365,8 @@ impl<R: Read + Seek> Xci<R> {
         // Set up the key area if this is a full XCI
         let key_area = if is_full_xci {
             let mut key_data = vec![0u8; 0x1000];
-            reader.seek(SeekFrom::Start(0))?;
-            reader.read_exact(&mut key_data)?;
+            reader.seek(SeekFrom::Start(0)).map_err(Error::from)?;
+            reader.read_exact(&mut key_data).map_err(Error::from)?;
             Some(key_data)
         } else {
             None
@@ -299,24 +378,26 @@ impl<R: Read + Seek> Xci<R> {
         let header_offset = if is_full_xci { 0x100 } else { 0 };
 
         let mut magic_area = [0u8; 4];
-        reader.seek(SeekFrom::Start(header_offset))?;
-        reader.read_exact(&mut magic_area)?;
-        reader.seek(SeekFrom::Start(header_offset))?;
+        reader
+            .seek(SeekFrom::Start(header_offset))
+            .map_err(Error::from)?;
+        reader.read_exact(&mut magic_area).map_err(Error::from)?;
+        reader
+            .seek(SeekFrom::Start(header_offset))
+            .map_err(Error::from)?;
 
         // Read the header
-        reader.seek(SeekFrom::Start(header_offset))?;
-        let header: XciHeader = reader.read_le()?;
-
-        // Read gamecard info
-        // Full XCIs would be at 0x200, in this case 0x1100 + 0x100
-        // Trimmed XCIs would be at 0x100, so the header offset will be 0
-        // reader.seek(SeekFrom::Start(header_offset + 0x100))?;
-        // let gamecard_info: CardHeaderEncryptedData = reader.read_le()?;
+        reader
+            .seek(SeekFrom::Start(header_offset))
+            .map_err(Error::from)?;
+        let header: XciHeader = reader.read_le().map_err(Error::from)?;
 
         // Read gamecard certificate
         // Full XCIs would have this offset at 0x8000,
         // so trimmed XCIs would have this at 0x7000
-        reader.seek(SeekFrom::Start(header_offset + 0x7000))?;
+        reader
+            .seek(SeekFrom::Start(header_offset + 0x7000))
+            .map_err(Error::from)?;
         // Attempt to read the gamecard certificate but don't fail if it doesn't exist
         let gamecard_cert = match reader.read_le::<GamecardCertificate>() {
             Ok(cert) => Some(cert),
@@ -345,9 +426,11 @@ impl<R: Read + Seek> Xci<R> {
 
     /// Reads the initial HFS0 header on the XCI file, returning a list of partitions found
     #[tracing::instrument(skip(self), level = "trace")]
-    pub fn list_hfs0_partitions(&mut self) -> binrw::BinResult<Hfs0<SubFile<&mut R>>> {
+    pub fn list_hfs0_partitions(&mut self) -> Result<Hfs0<SubFile<&mut R>>, Error> {
         let hfs0_offset = self.get_hfs0_offset();
-        self.reader.seek(SeekFrom::Start(hfs0_offset))?;
+        self.reader
+            .seek(SeekFrom::Start(hfs0_offset))
+            .map_err(Error::from)?;
 
         // Create a SubFile that covers the entire rest of the XCI file
         // This allows reading the HFS0 header and all partition data
@@ -357,7 +440,8 @@ impl<R: Read + Seek> Xci<R> {
             // Don't limit to just header_size - we need access to the full content
             hfs0_offset + (self.header.valid_data_end_address as u64 * MEDIA_SIZE),
         );
-        let hfs0 = Hfs0::new(subfile)?;
+        let hfs0 =
+            Hfs0::new(subfile).map_err(|e| Error::Other(format!("Failed to parse HFS0: {}", e)))?;
 
         trace!("HFS0 header read successfully");
 
@@ -369,7 +453,7 @@ impl<R: Read + Seek> Xci<R> {
     pub fn open_hfs0_partition(
         &mut self,
         part_name: &str,
-    ) -> binrw::BinResult<Option<Hfs0<SubFile<&mut R>>>> {
+    ) -> Result<Option<Hfs0<SubFile<&mut R>>>, Error> {
         let hfs0_header = self.list_hfs0_partitions()?;
 
         // trace!("Attempting to open HFS0 partition: {}", part_name);
@@ -382,7 +466,13 @@ impl<R: Read + Seek> Xci<R> {
             let start_offset = hfs0_offset + file.offset;
             let end_offset = start_offset + file.size;
 
-            let part = Hfs0::new(SubFile::new(&mut self.reader, start_offset, end_offset))?;
+            let part = Hfs0::new(SubFile::new(&mut self.reader, start_offset, end_offset))
+                .map_err(|e| {
+                    Error::Other(format!(
+                        "Failed to parse HFS0 partition {}: {}",
+                        part_name, e
+                    ))
+                })?;
 
             trace!("HFS0 partition opened successfully");
 
@@ -394,24 +484,24 @@ impl<R: Read + Seek> Xci<R> {
 
     /// Opens the `secure` partition if it exists
     #[tracing::instrument(skip(self), level = "trace")]
-    pub fn open_secure_partition(&mut self) -> binrw::BinResult<Option<Hfs0<SubFile<&mut R>>>> {
+    pub fn open_secure_partition(&mut self) -> Result<Option<Hfs0<SubFile<&mut R>>>, Error> {
         self.open_hfs0_partition("secure")
     }
 
     /// Opens the `normal` partition if it exists
     #[tracing::instrument(skip(self), level = "trace")]
-    pub fn open_normal_partition(&mut self) -> binrw::BinResult<Option<Hfs0<SubFile<&mut R>>>> {
+    pub fn open_normal_partition(&mut self) -> Result<Option<Hfs0<SubFile<&mut R>>>, Error> {
         self.open_hfs0_partition("normal")
     }
 
     /// Opens the `logo` partition if it exists
     #[tracing::instrument(skip(self), level = "trace")]
-    pub fn open_logo_partition(&mut self) -> binrw::BinResult<Option<Hfs0<SubFile<&mut R>>>> {
+    pub fn open_logo_partition(&mut self) -> Result<Option<Hfs0<SubFile<&mut R>>>, Error> {
         self.open_hfs0_partition("logo")
     }
 
     #[tracing::instrument(skip(self), level = "trace")]
-    pub fn open_update_partition(&mut self) -> binrw::BinResult<Option<Hfs0<SubFile<&mut R>>>> {
+    pub fn open_update_partition(&mut self) -> Result<Option<Hfs0<SubFile<&mut R>>>, Error> {
         self.open_hfs0_partition("update")
     }
 }
@@ -421,16 +511,16 @@ impl<R: Read + Seek> TitleDataExt for Xci<R> {
         &mut self,
         keyset: &crate::formats::Keyset,
         title_keyset: std::option::Option<&crate::formats::title_keyset::TitleKeys>,
-    ) -> Result<Vec<crate::formats::cnmt::Cnmt>, crate::error::Error> {
+    ) -> Result<Vec<crate::formats::cnmt::Cnmt>, Error> {
         let mut cnmts = Vec::new();
 
-        let secure = self.open_secure_partition()?;
+        let secure = self.open_secure_partition().map_err(Error::from)?;
         if let Some(mut secure) = secure {
             let files = secure.get_files();
             for file in files {
                 if file.name.ends_with(".cnmt.nca") {
                     let mut buf = vec![0u8; file.size as usize];
-                    secure.read_buf(&file, &mut buf)?;
+                    secure.read_buf(&file, &mut buf).map_err(Error::from)?;
                     let mut cursor = std::io::Cursor::new(buf);
                     let mut nca =
                         crate::formats::nca::Nca::from_reader(&mut cursor, keyset, title_keyset)?;
@@ -448,9 +538,9 @@ impl<R: Read + Seek> TitleDataExt for Xci<R> {
                 } else if file.name.ends_with(".cnmt") {
                     let file = secure
                         .get_file(&file.name)
-                        .ok_or(crate::error::Error::NotFound(file.name.clone()))?;
+                        .ok_or(Error::NotFound(file.name.clone()))?;
                     let mut buf = vec![0u8; file.size as usize];
-                    secure.read_buf(&file, &mut buf)?;
+                    secure.read_buf(&file, &mut buf).map_err(Error::from)?;
                     let mut cursor = std::io::Cursor::new(buf);
                     let cnmt = crate::formats::cnmt::Cnmt::from_reader(&mut cursor)?;
                     cnmts.push(cnmt);
@@ -461,7 +551,7 @@ impl<R: Read + Seek> TitleDataExt for Xci<R> {
         Ok(cnmts)
     }
 
-    fn title_id(&self) -> Result<u64, crate::error::Error> {
+    fn title_id(&self) -> Result<u64, Error> {
         Ok(self.header.package_id)
     }
 }
