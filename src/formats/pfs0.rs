@@ -17,7 +17,7 @@ use binrw::prelude::*;
 
 use crate::{
     FileEntryExt, TitleDataExt, VirtualFSExt,
-    io::{ReaderExt, SharedReader, SubFile},
+    io::{SharedReader, SubFile},
 };
 
 // Type alias for NSP (Nintendo Submission Package), which are simply just

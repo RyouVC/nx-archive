@@ -1,7 +1,7 @@
 use crate::{
     FileEntryExt, VirtualFSExt,
     error::Error,
-    io::{ReaderExt, SharedReader, SubFile},
+    io::{SharedReader, SubFile},
 };
 use binrw::prelude::*;
 use std::collections::HashMap;

@@ -9,7 +9,7 @@
 
 use crate::{
     FileEntryExt, VirtualFSExt,
-    io::{ReaderExt, SharedReader, SubFile},
+    io::{SharedReader, SubFile},
 };
 use binrw::prelude::*;
 use std::io::{Read, Seek, SeekFrom};

@@ -18,7 +18,7 @@ use tracing::trace;
 use crate::{
     FileEntryExt, TitleDataExt, VirtualFSExt,
     error::Error,
-    io::{ReaderExt, SharedReader, SubFile},
+    io::SubFile,
 };
 
 use super::hfs0::Hfs0;
