@@ -3,8 +3,9 @@ use cipher::{KeyInit, generic_array::GenericArray};
 use hex::FromHex;
 use std::collections::HashMap;
 use std::fmt;
+use std::fmt::Display;
 use std::fs::File;
-use std::io::{BufRead, BufReader, Error, Read, Result, Seek};
+use std::io::{BufRead, BufReader, Read, Result, Seek};
 use std::path::Path;
 use xts_mode::Xts128;
 
@@ -64,6 +65,36 @@ impl fmt::Debug for Keyset {
         }
 
         debug_struct.finish()
+    }
+}
+
+impl Display for Keyset {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let format_indices = |keys: &HashMap<u8, [u8; 0x10]>,
+                              name: &str,
+                              f: &mut fmt::Formatter<'_>|
+         -> fmt::Result {
+            let mut indices: Vec<_> = keys.keys().collect();
+            indices.sort();
+            write!(
+                f,
+                "{} keys: {}",
+                name,
+                indices
+                    .iter()
+                    .map(|i| format!("{:02x}", i))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        };
+
+        format_indices(&self.key_area_keys_application(), "Application", f)?;
+        writeln!(f)?;
+        format_indices(&self.key_area_keys_ocean(), "Ocean", f)?;
+        writeln!(f)?;
+        format_indices(&self.key_area_keys_system(), "System", f)?;
+        writeln!(f)?;
+        format_indices(&self.title_keks(), "Title KEK", f)
     }
 }
 
@@ -150,9 +181,23 @@ impl Keyset {
         let mut prefixes = std::collections::HashSet::new();
 
         for key in self.raw_keys.keys() {
-            if let Some(prefix) = key.split('_').next() {
-                prefixes.insert(prefix.to_string());
+            // For keys with format like key_area_key_application_00,
+            // we want the prefix to be key_area_key_application
+            let parts: Vec<&str> = key.split('_').collect();
+            if parts.len() > 1 {
+                // Check if the last part is a hex number (like "00", "01", etc.)
+                if let Some(last) = parts.last() {
+                    if u8::from_str_radix(last, 16).is_ok() {
+                        // If last part is a hex number, use everything before it as prefix
+                        let prefix = parts[..parts.len() - 1].join("_");
+                        prefixes.insert(prefix);
+                        continue;
+                    }
+                }
             }
+
+            // For non-indexed keys or as a fallback, insert the whole key
+            prefixes.insert(key.clone());
         }
 
         let mut prefix_list: Vec<String> = prefixes.into_iter().collect();
@@ -273,38 +318,6 @@ impl Keyset {
             _ => None,
         }
     }
-
-    /// List all available key indices for debugging
-    pub fn list_available_key_indices(&self) -> String {
-        let mut result = String::new();
-
-        let format_indices = |keys: &HashMap<u8, [u8; 0x10]>, name: &str| -> String {
-            let mut indices: Vec<_> = keys.keys().collect();
-            indices.sort();
-            format!(
-                "{} keys: {}",
-                name,
-                indices
-                    .iter()
-                    .map(|i| format!("{:02x}", i))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )
-        };
-
-        result.push_str(&format_indices(
-            &self.key_area_keys_application(),
-            "Application",
-        ));
-        result.push_str("\n");
-        result.push_str(&format_indices(&self.key_area_keys_ocean(), "Ocean"));
-        result.push_str("\n");
-        result.push_str(&format_indices(&self.key_area_keys_system(), "System"));
-        result.push_str("\n");
-        result.push_str(&format_indices(&self.title_keks(), "Title KEK"));
-
-        result
-    }
 }
 
 #[cfg(test)]
@@ -321,10 +334,7 @@ mod tests {
         tracing::info!("{:#?}", keyset);
 
         // Print all available key indices for debugging
-        tracing::info!(
-            "Available key indices:\n{}",
-            keyset.list_available_key_indices()
-        );
+        tracing::info!("Available key indices:\n{}", keyset);
 
         tracing::info!(
             appkey_len = keyset.key_area_keys_application().len(),
@@ -425,7 +435,7 @@ mod tests {
 
         // Test getting keys by prefix
         let custom_keys = keyset.get_keys_with_prefix("custom");
-        assert_eq!(custom_keys.len(), 1);
+        assert_eq!(custom_keys.len(), 1); // Fix: only "custom_test_key" starts with prefix "custom"
 
         let title_keys = keyset.get_keys_with_prefix("titlekek");
         assert_eq!(title_keys.len(), 4);

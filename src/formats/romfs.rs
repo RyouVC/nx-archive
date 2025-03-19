@@ -1,7 +1,7 @@
-use binrw::{BinRead, BinReaderExt, BinResult};
+use binrw::prelude::*;
 use std::collections::HashMap;
-use std::io::{Read, Result as IoResult, Seek, SeekFrom};
-use std::path::{Path, PathBuf};
+use std::io::{Read, Seek, SeekFrom};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use crate::io::SubFile;
@@ -43,7 +43,8 @@ pub enum RomFsError {
 // }
 
 /// RomFS header structure
-#[derive(Debug, Clone, BinRead)]
+#[binrw]
+#[derive(Debug, Clone)]
 #[br(little)]
 pub struct RomFsHeader {
     pub header_size: u32,
@@ -313,7 +314,7 @@ impl<R: Read + Seek> RomFs<R> {
         }
 
         // If not in cache, read from file
-        let mut reader = &mut self.reader;
+        let reader = &mut self.reader;
         reader.seek(SeekFrom::Start(
             self.header.dir_table_offset + offset as u64,
         ))?;
@@ -349,7 +350,7 @@ impl<R: Read + Seek> RomFs<R> {
         }
 
         // If not in cache, read from file
-        let mut reader = &mut self.reader;
+        let reader = &mut self.reader;
         reader.seek(SeekFrom::Start(
             self.header.file_table_offset + offset as u64,
         ))?;

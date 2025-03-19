@@ -1,6 +1,4 @@
-use std::io::{Read, Seek, SeekFrom};
-
-use binrw::{Endian, prelude::*};
+use binrw::prelude::*;
 
 #[binrw]
 #[brw(little)]

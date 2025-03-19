@@ -17,7 +17,7 @@ use tracing::trace;
 
 use crate::io::SubFile;
 
-use super::hfs0::{self, Hfs0};
+use super::hfs0::Hfs0;
 
 #[binrw]
 #[derive(Debug)]
@@ -463,12 +463,14 @@ mod tests {
         // open pfs0
         let mut pfs0 = nca.open_pfs0_filesystem(0).unwrap();
         let files = pfs0.list_files();
-        for file in files {
+        files.into_iter().for_each(|file| {
             println!("File: {:?}", file);
-        }
+        });
 
         // read file Application_010005501e68c000.cnmt
-        let test = pfs0.extract_file("Application_010005501e68c000.cnmt").unwrap();
+        let test = pfs0
+            .extract_file("Application_010005501e68c000.cnmt")
+            .unwrap();
         let mut cursor = std::io::Cursor::new(test);
         let cnmt = Cnmt::from_reader(&mut cursor).unwrap();
         println!("{:#?}", cnmt);

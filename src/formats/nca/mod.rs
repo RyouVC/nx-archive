@@ -39,7 +39,7 @@ mod types;
 use tracing::instrument;
 
 // Use the ReadSeek trait from io module instead of from crate root
-use crate::io::{Aes128CtrReader, ReadSeek, SharedReader, SubFile};
+use crate::io::{Aes128CtrReader, ReadSeek, SubFile};
 
 use super::keyset::get_nintendo_tweak;
 use super::pfs0::Pfs0;
@@ -448,17 +448,17 @@ impl<R: Read + Seek> Nca<R> {
                 KeyAreaEncryptionKeyIndex::Application => {
                     let key = keyset.get_key_area_key_application(key_gen as usize);
                     tracing::trace!(key_gen = %key_gen, key_type = "Application", key = ?key, "Key area key obtained");
-                    key.map(|k| k.clone())
+                    key
                 }
                 KeyAreaEncryptionKeyIndex::Ocean => {
                     let key = keyset.get_key_area_key_ocean(key_gen as usize);
                     tracing::trace!(key_gen = %key_gen, key_type = "Ocean", key = ?key, "Key area key obtained");
-                    key.map(|k| k.clone())
+                    key
                 }
                 KeyAreaEncryptionKeyIndex::System => {
                     let key = keyset.get_key_area_key_system(key_gen as usize);
                     tracing::trace!(key_gen = %key_gen, key_type = "System", key = ?key, "Key area key obtained");
-                    key.map(|k| k.clone())
+                    key
                 }
             };
 
