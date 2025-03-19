@@ -28,21 +28,17 @@ It plans to support all other Nintendo archive formats in the future, including 
 
 After adding nx-archive to your `Cargo.toml`, you can use it like so:
 
-```rust
+```rust no_run
 use nx_archive::formats::pfs0::Pfs0;
 use nx_archive::formats::nca::Nca;
-
+use nx_archive::formats::hfs0::Hfs0;
+use std::fs::File;
 fn main() {
-    let nca = Nca::from_file("path/to/file.nca").unwrap();
-    let pfs0 = Pfs0::from_nca(&nca).unwrap();
+    let nsp_file = File::open("path/to/file.nsp").unwrap();
+    let pfs0 = Pfs0::from_reader(nsp_file).unwrap();
 
     for file in pfs0.list_files() {
         println!("File: {}", file.name());
-
-        // Read the file's contents to a Vec<u8>
-        let contents = pfs0.read_file(&file).unwrap();
-        println!("Contents: {:?}", contents);
     }
 }
-
 ```

@@ -131,7 +131,7 @@ impl<R: Read + Seek> RomFs<R> {
     const MAX_REASONABLE_TABLE_SIZE: u32 = 0x10000000; // 256MB
 
     /// Create a new RomFS parser from a reader
-    pub fn new(mut reader: R) -> Result<Self, Error> {
+    pub fn from_reader(mut reader: R) -> Result<Self, Error> {
         // Read and dump the first 64 bytes for debugging
         let mut preview = [0u8; 64];
         let reader_clone = &mut reader;
@@ -516,7 +516,7 @@ impl<R: Read + Seek + Clone> RomFs<R> {
 impl<R: Read + Seek> RomFs<SharedReader<R>> {
     /// Create a new RomFS parser from a shared reader
     pub fn from_shared(reader: SharedReader<R>) -> Result<Self, Error> {
-        Self::new(reader)
+        Self::from_reader(reader)
     }
 }
 
@@ -536,7 +536,7 @@ impl<R: Read + Seek + Clone> Clone for RomFs<R> {
 impl<R: Read + Seek + Clone> VirtualFSExt<R> for RomFs<R> {
     type Entry = FileEntry;
 
-    fn list_files(&self) -> Vec<Self::Entry> {
+    fn list_files(&self) -> Result<Vec<Self::Entry>, Error> {
         let mut files = Vec::new();
         // We need to mutably borrow self, so we clone it
         let mut romfs = self.clone();
@@ -546,13 +546,13 @@ impl<R: Read + Seek + Clone> VirtualFSExt<R> for RomFs<R> {
                 files.push(file);
             }
         }
-        files
+        Ok(files)
     }
 
-    fn get_file(&self, name: &str) -> Option<Self::Entry> {
+    fn get_file(&self, name: &str) -> Result<Option<Self::Entry>, Error> {
         // We need to mutably borrow self, so we clone it
         let mut romfs = self.clone();
-        romfs.find_file(name).ok()
+        Ok(romfs.find_file(name).ok())
     }
 
     fn create_reader(&mut self, file: &Self::Entry) -> Result<SubFile<R>, Error> {

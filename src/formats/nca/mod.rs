@@ -786,7 +786,7 @@ impl<R: Read + Seek> Nca<R> {
 
         // Attempt to open the PFS0
         tracing::trace!("Attempting to open PFS0");
-        match Pfs0::new(reader) {
+        match Pfs0::from_reader(reader) {
             Ok(pfs0) => {
                 // List the files if available
                 if let Ok(files) = pfs0.list_files() {
@@ -834,7 +834,7 @@ impl<R: Read + Seek> Nca<R> {
         // Attempt to open the RomFS
         tracing::trace!("Attempting to open RomFS");
 
-        RomFs::new(reader)
+        RomFs::from_reader(reader)
     }
     pub fn decrypt_and_dump_fs(&mut self, idx: usize) -> Result<Vec<u8>, crate::error::Error> {
         tracing::trace!("Decrypting and dumping filesystem {}", idx);

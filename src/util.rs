@@ -56,10 +56,10 @@ pub trait VirtualFSExt<R: Read + Seek> {
     type Entry: FileEntryExt<R, FS = Self>;
 
     /// List files in the archive
-    fn list_files(&self) -> Vec<Self::Entry>;
+    fn list_files(&self) -> Result<Vec<Self::Entry>, crate::error::Error>;
 
     /// Get a file by name
-    fn get_file(&self, name: &str) -> Option<Self::Entry>;
+    fn get_file(&self, name: &str) -> Result<Option<Self::Entry>, crate::error::Error>;
 
     /// Create a SubFile reader for a given file entry
     fn create_reader(&mut self, file: &Self::Entry) -> Result<SubFile<R>, crate::error::Error>;

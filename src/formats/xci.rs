@@ -268,7 +268,7 @@ pub struct XciPartition {
 impl<R: Read + Seek + Clone> VirtualFSExt<R> for Xci<R> {
     type Entry = XciPartition;
 
-    fn list_files(&self) -> Vec<Self::Entry> {
+    fn list_files(&self) -> Result<Vec<Self::Entry>, Error> {
         // We need to list the HFS0 partitions, but we can't borrow self as mutable
         // So we'll clone the reader and create a new instance
         let mut reader = self.reader.clone();
@@ -282,22 +282,21 @@ impl<R: Read + Seek + Clone> VirtualFSExt<R> for Xci<R> {
             hfs0_offset + (self.header.valid_data_end_address as u64 * MEDIA_SIZE),
         );
 
-        if let Ok(hfs0) = Hfs0::new(subfile) {
-            hfs0.get_files()
-                .into_iter()
-                .map(|file| XciPartition {
-                    name: file.name,
-                    offset: hfs0_offset + file.offset,
-                    size: file.size,
-                })
-                .collect()
-        } else {
-            Vec::new()
-        }
+        let hfs0 = Hfs0::new(subfile)?;
+        Ok(hfs0
+            .list_files()?
+            .into_iter()
+            .map(|file| XciPartition {
+                name: file.name,
+                offset: hfs0_offset + file.offset,
+                size: file.size,
+            })
+            .collect())
     }
 
-    fn get_file(&self, name: &str) -> Option<Self::Entry> {
-        self.list_files().into_iter().find(|f| f.name == name)
+    fn get_file(&self, name: &str) -> Result<Option<Self::Entry>, Error> {
+        let files = self.list_files()?;
+        Ok(files.into_iter().find(|f| f.name == name))
     }
 
     fn create_reader(&mut self, file: &Self::Entry) -> Result<SubFile<R>, Error> {
@@ -459,7 +458,7 @@ impl<R: Read + Seek> Xci<R> {
         // trace!("Attempting to open HFS0 partition: {}", part_name);
         let part = hfs0_header.get_file(part_name);
 
-        if let Some(file) = part {
+        if let Ok(Some(file)) = part {
             trace!("Attempting to open HFS0 partition: {}", part_name);
             // Calculate the absolute offset in the file
             let hfs0_offset = self.get_hfs0_offset();
@@ -514,13 +513,13 @@ impl<R: Read + Seek> TitleDataExt for Xci<R> {
     ) -> Result<Vec<crate::formats::cnmt::Cnmt>, Error> {
         let mut cnmts = Vec::new();
 
-        let secure = self.open_secure_partition().map_err(Error::from)?;
+        let secure = self.open_secure_partition()?;
         if let Some(mut secure) = secure {
-            let files = secure.get_files();
+            let files = secure.list_files()?;
             for file in files {
                 if file.name.ends_with(".cnmt.nca") {
                     let mut buf = vec![0u8; file.size as usize];
-                    secure.read_buf(&file, &mut buf).map_err(Error::from)?;
+                    secure.read_buf(&file, &mut buf)?;
                     let mut cursor = std::io::Cursor::new(buf);
                     let mut nca =
                         crate::formats::nca::Nca::from_reader(&mut cursor, keyset, title_keyset)?;
@@ -537,10 +536,10 @@ impl<R: Read + Seek> TitleDataExt for Xci<R> {
                     }
                 } else if file.name.ends_with(".cnmt") {
                     let file = secure
-                        .get_file(&file.name)
+                        .get_file(&file.name)?
                         .ok_or(Error::NotFound(file.name.clone()))?;
                     let mut buf = vec![0u8; file.size as usize];
-                    secure.read_buf(&file, &mut buf).map_err(Error::from)?;
+                    secure.read_buf(&file, &mut buf)?;
                     let mut cursor = std::io::Cursor::new(buf);
                     let cnmt = crate::formats::cnmt::Cnmt::from_reader(&mut cursor)?;
                     cnmts.push(cnmt);

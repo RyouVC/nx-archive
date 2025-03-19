@@ -11,6 +11,8 @@ pub enum Error {
     InvalidData(String),
     #[error("Unable to parse binary data: {0}")]
     BinaryParser(#[from] binrw::Error),
+    #[error("Unable to parse string: {0}")]
+    StringParser(#[from] core::str::Utf8Error),
     #[error("Invalid state: {0}")]
     InvalidState(String),
     #[error("Invalid format: {0}")]
@@ -31,6 +33,8 @@ pub enum Error {
     CryptoError(String),
     #[error("Key Lookup error: {0}")]
     KeyLookupError(String),
+    #[error("Title key error: {0}")]
+    TitleKeyError(#[from] crate::formats::title_keyset::KeyError),
 }
 
 impl From<InvalidLength> for Error {

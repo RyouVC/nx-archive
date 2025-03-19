@@ -83,8 +83,7 @@ pub struct Hfs0<R: Read + Seek> {
 impl<R: Read + Seek> Hfs0<R> {
     /// Create a new HFS0 parser from a reader
     pub fn new(mut reader: R) -> Result<Self, crate::error::Error> {
-        let header =
-            Hfs0Header::read(&mut reader).map_err(|e| crate::error::Error::BinaryParser(e))?;
+        let header = Hfs0Header::read(&mut reader)?;
         Ok(Self { header, reader })
     }
 }
@@ -140,22 +139,22 @@ impl<R: Read + Seek> Hfs0<R> {
     ///
     /// # Example
     /// ```no_run
-    /// # use std::io::Cursor;
-    /// # let mut hfs0 = Hfs0::new(Cursor::new(vec![0u8; 1024])).unwrap();
-    /// # let file = hfs0.files.first().unwrap();
+    /// # use std::fs::File;
+    /// # use nx_archive::formats::hfs0::Hfs0;
+    /// let hfs0_image = File::open("path/to/file.hfs0").unwrap();
+    /// let mut hfs0 = Hfs0::new(hfs0_image).unwrap();
+    /// let file = hfs0.get_files().unwrap();
+    /// let file = file.first().unwrap();
     /// let mut buffer = vec![0u8; file.size as usize];
-    /// hfs0.read_buf(file, &mut buffer)?;
+    /// hfs0.read_buf(file, &mut buffer).unwrap();
     /// ```
     pub fn read_buf(&mut self, file: &Hfs0File, buf: &mut [u8]) -> Result<(), crate::error::Error> {
-        self.reader
-            .seek(SeekFrom::Start(file.offset))
-            .map_err(crate::error::Error::Io)?;
-        self.reader
-            .read_exact(buf)
-            .map_err(crate::error::Error::Io)?;
+        self.reader.seek(SeekFrom::Start(file.offset))?;
+        self.reader.read_exact(buf)?;
         Ok(())
     }
 
+    /// Create a SubFile reader for a given file entry
     pub fn subfile(&mut self, file: &Hfs0File) -> SubFile<R>
     where
         R: Clone,
@@ -163,7 +162,7 @@ impl<R: Read + Seek> Hfs0<R> {
         SubFile::new(self.reader.clone(), file.offset, file.offset + file.size)
     }
 
-    pub fn get_files(&self) -> Vec<Hfs0File> {
+    pub fn list_files(&self) -> Result<Vec<Hfs0File>, crate::error::Error> {
         self.header
             .file_entries
             .iter()
@@ -174,55 +173,66 @@ impl<R: Read + Seek> Hfs0<R> {
                     .position(|&b| b == 0)
                     .unwrap_or(filename_bytes.len());
                 let name = std::str::from_utf8(&filename_bytes[..end])
-                    .unwrap()
-                    .to_string();
-
-                // Use the name we just extracted to call get_file()
-                // Since we know the file exists, unwrap is safe here
-                self.get_file(&name).unwrap()
+                    .map_err(|e| crate::error::Error::InvalidData(e.to_string()))?;
+                self.get_file(name)?.ok_or_else(|| {
+                    crate::error::Error::InvalidState("File not found after parsing".to_string())
+                })
             })
             .collect()
     }
 
-    pub fn get_file(&self, name: &str) -> Option<Hfs0File> {
+    /// Get a file from the HFS0 archive by name
+    ///
+    /// # Arguments
+    /// * `name` - The name of the file to get
+    ///
+    /// # Returns
+    /// * `Result<Option<Hfs0File>, crate::error::Error>` - The file if found, None otherwise
+    ///
+    /// # Errors
+    /// * `crate::error::Error::InvalidData` - If the file name is not valid UTF-8
+    pub fn get_file(&self, name: &str) -> Result<Option<Hfs0File>, crate::error::Error> {
         // Calculate the header size: 16 bytes for the HFS0 header fields + file entries + string table
         let header_size = 16
             + (self.header.file_entries.len() * std::mem::size_of::<Hfs0Entry>())
             + self.header.string_table_size as usize;
 
-        self.header.file_entries.iter().find_map(|entry| {
-            let filename_bytes = &self.header.string_table[entry.filename_offset as usize..];
-            let end = filename_bytes
-                .iter()
-                .position(|&b| b == 0)
-                .unwrap_or(filename_bytes.len());
-            let entry_name = std::str::from_utf8(&filename_bytes[..end])
-                .unwrap()
-                .to_string();
+        self.header
+            .file_entries
+            .iter()
+            .find_map(|entry| {
+                let filename_bytes = &self.header.string_table[entry.filename_offset as usize..];
+                let end = filename_bytes
+                    .iter()
+                    .position(|&b| b == 0)
+                    .unwrap_or(filename_bytes.len());
+                let entry_name = std::str::from_utf8(&filename_bytes[..end])
+                    .map_err(|e| crate::error::Error::InvalidData(e.to_string()))
+                    .ok()?;
 
-            if entry_name == name {
-                Some(Hfs0File {
-                    name: entry_name,
-                    size: entry.size,
-                    // Add header size to the offset to get the absolute file position
-                    offset: entry.offset + header_size as u64,
-                    hash: entry.sha256,
-                })
-            } else {
-                None
-            }
-        })
+                if entry_name == name {
+                    Some(Hfs0File {
+                        name: entry_name.to_string(),
+                        size: entry.size,
+                        offset: entry.offset + header_size as u64,
+                        hash: entry.sha256,
+                    })
+                } else {
+                    None
+                }
+            })
+            .map_or(Ok(None), |file| Ok(Some(file)))
     }
 }
 
 impl<R: Read + Seek + Clone> VirtualFSExt<R> for Hfs0<R> {
     type Entry = Hfs0File;
 
-    fn list_files(&self) -> Vec<Self::Entry> {
-        self.get_files()
+    fn list_files(&self) -> Result<Vec<Self::Entry>, crate::error::Error> {
+        self.list_files()
     }
 
-    fn get_file(&self, name: &str) -> Option<Self::Entry> {
+    fn get_file(&self, name: &str) -> Result<Option<Self::Entry>, crate::error::Error> {
         self.get_file(name)
     }
 

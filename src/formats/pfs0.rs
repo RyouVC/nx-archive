@@ -135,7 +135,7 @@ pub struct Pfs0<R: Read + Seek> {
 
 impl<R: Read + Seek> Pfs0<R> {
     /// Create a new PFS0 parser from a reader
-    pub fn new(mut reader: R) -> Result<Self, crate::error::Error> {
+    pub fn from_reader(mut reader: R) -> Result<Self, crate::error::Error> {
         let header: Pfs0Header = reader.read_le()?;
         // Magic validation is handled by binrw via the magic attribute
         println!("PFS0 Header: {:?}", header);
@@ -243,9 +243,12 @@ impl<R: Read + Seek + Clone> Pfs0<R> {
 impl<R: Read + Seek> Pfs0<SharedReader<R>> {
     /// Create a new PFS0 parser from a shared reader
     pub fn from_shared(reader: SharedReader<R>) -> Result<Self, crate::error::Error> {
-        Self::new(reader)
+        Self::from_reader(reader)
     }
 }
+
+// Title data extension for PFS0, since NSP (Nintendo Submission Packages) are
+// just PFS0 images
 
 impl<R: Read + Seek + Clone> TitleDataExt for Pfs0<R> {
     fn get_cnmts(
@@ -304,12 +307,12 @@ impl<R: Read + Seek + Clone> TitleDataExt for Pfs0<R> {
 impl<R: Read + Seek + Clone> VirtualFSExt<R> for Pfs0<R> {
     type Entry = Pfs0File;
 
-    fn list_files(&self) -> Vec<Self::Entry> {
-        self.get_files()
+    fn list_files(&self) -> Result<Vec<Self::Entry>, crate::error::Error> {
+        Ok(self.get_files())
     }
 
-    fn get_file(&self, name: &str) -> Option<Self::Entry> {
-        self.get_file(name)
+    fn get_file(&self, name: &str) -> Result<Option<Self::Entry>, crate::error::Error> {
+        Ok(self.get_file(name))
     }
 
     fn create_reader(&mut self, file: &Self::Entry) -> Result<SubFile<R>, crate::error::Error> {
@@ -357,7 +360,7 @@ mod tests {
     fn test_pfs0_reader() {
         let file = include_bytes!("../../test/Browser.nsp");
         let cursor = std::io::Cursor::new(&file[..]);
-        let mut pfs0 = Pfs0::new(cursor).unwrap();
+        let mut pfs0 = Pfs0::from_reader(cursor).unwrap();
 
         println!("{:?}", pfs0.files);
 
