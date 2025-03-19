@@ -15,7 +15,7 @@ use binrw::prelude::*;
 use std::io::{Read, Seek, SeekFrom};
 use tracing::trace;
 
-use crate::{FileEntryExt, TitleDataExt, io::SubFile};
+use crate::{TitleDataExt, io::SubFile};
 
 use super::hfs0::Hfs0;
 
