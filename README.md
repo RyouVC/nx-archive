@@ -23,3 +23,26 @@ It plans to support all other Nintendo archive formats in the future, including 
 - NRR (Nintendo Switch executable verification data)
 - IMKV (Key-value pair file format)
 - NPDM (Extended headers)
+
+## Usage
+
+After adding nx-archive to your `Cargo.toml`, you can use it like so:
+
+```rust
+use nx_archive::formats::pfs0::Pfs0;
+use nx_archive::formats::nca::Nca;
+
+fn main() {
+    let nca = Nca::from_file("path/to/file.nca").unwrap();
+    let pfs0 = Pfs0::from_nca(&nca).unwrap();
+
+    for file in pfs0.list_files() {
+        println!("File: {}", file.name());
+
+        // Read the file's contents to a Vec<u8>
+        let contents = pfs0.read_file(&file).unwrap();
+        println!("Contents: {:?}", contents);
+    }
+}
+
+```

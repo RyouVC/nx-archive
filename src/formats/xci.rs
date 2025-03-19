@@ -416,7 +416,7 @@ impl<R: Read + Seek> Xci<R> {
     }
 }
 
-impl TitleDataExt for Xci<SubFile<std::fs::File>> {
+impl<R: Read + Seek> TitleDataExt for Xci<R> {
     fn get_cnmts(
         &mut self,
         keyset: &crate::formats::Keyset,
@@ -430,7 +430,7 @@ impl TitleDataExt for Xci<SubFile<std::fs::File>> {
             for file in files {
                 if file.name.ends_with(".cnmt.nca") {
                     let mut buf = vec![0u8; file.size as usize];
-                    secure.read_to_buf(&file, &mut buf)?;
+                    secure.read_buf(&file, &mut buf)?;
                     let mut cursor = std::io::Cursor::new(buf);
                     let mut nca =
                         crate::formats::nca::Nca::from_reader(&mut cursor, keyset, title_keyset)?;
@@ -450,7 +450,7 @@ impl TitleDataExt for Xci<SubFile<std::fs::File>> {
                         .get_file(&file.name)
                         .ok_or(crate::error::Error::NotFound(file.name.clone()))?;
                     let mut buf = vec![0u8; file.size as usize];
-                    secure.read_to_buf(&file, &mut buf)?;
+                    secure.read_buf(&file, &mut buf)?;
                     let mut cursor = std::io::Cursor::new(buf);
                     let cnmt = crate::formats::cnmt::Cnmt::from_reader(&mut cursor)?;
                     cnmts.push(cnmt);
@@ -470,7 +470,7 @@ impl TitleDataExt for Xci<SubFile<std::fs::File>> {
 mod tests {
     use tracing_test::traced_test;
 
-    use crate::formats::{Keyset, cnmt::Cnmt};
+    use crate::formats::Keyset;
 
     use super::*;
     use std::fs::File;
@@ -487,40 +487,10 @@ mod tests {
         trace!("HFS Header Offset {:02X?}", xci.header.hfs0_offset);
         // println!("{:#?}", xci.gamecard_info);
         println!("{:?}", xci.gamecard_cert);
-
-        // xci.read_hfs0_header().unwrap();
-        let parts = xci.list_hfs0_partitions().unwrap();
-        println!("{:#?}", parts.get_files());
-        let mut normal_part = xci.open_hfs0_partition("secure").unwrap().unwrap();
-
-        let files = normal_part.get_files();
-        for file in &files {
-            println!("File: {:?}", file);
-        }
-
-        let test = normal_part
-            .get_file("b48004cad1eea9744b3520a21603a61a.cnmt.nca")
-            .unwrap();
-        println!("Test file: {:?}", test);
-        let file = normal_part.read_to_vec(&test).unwrap();
         let keyset = Keyset::from_file("prod.keys").unwrap();
+        let title_keyset = None;
 
-        // Now let's try to cnmt parse this
-        let mut cursor = std::io::Cursor::new(file);
-        let mut nca = crate::formats::nca::Nca::from_reader(&mut cursor, &keyset, None).unwrap();
-        // println!("{:#?}", nca);
-
-        // open pfs0
-        let mut pfs0 = nca.open_pfs0_filesystem(0).unwrap();
-        let files = pfs0.list_files();
-        files.into_iter().for_each(|file| {
-            println!("File: {:?}", file);
-        });
-
-        // read file Application_010005501e68c000.cnmt
-        let test = pfs0.read_file("Application_010005501e68c000.cnmt").unwrap();
-        let mut cursor = std::io::Cursor::new(test);
-        let cnmt = Cnmt::from_reader(&mut cursor).unwrap();
-        println!("{:#?}", cnmt);
+        let cnmts = xci.get_cnmts(&keyset, title_keyset).unwrap();
+        println!("{:#?}", cnmts);
     }
 }

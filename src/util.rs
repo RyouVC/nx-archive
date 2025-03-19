@@ -24,20 +24,25 @@ pub trait TitleDataExt {
 }
 
 pub trait FileEntryExt<R: Read + Seek> {
-    /// Returns a virtual file reader that buffers and reads the file,
+    type FS: VirtualFSExt<R>;
+
+    /// Returns a virtual file reader that buffers and reads the file
     ///
     /// This is useful for reading files from archives, which may be compressed or encrypted.
     /// And for reading large files, which may cause performance issues if the entire file is read into memory.
-    fn file_reader(&self, reader: R) -> Result<SubFile<R>, crate::error::Error>;
+    fn file_reader(&self, fs: &mut Self::FS) -> Result<SubFile<R>, crate::error::Error>;
+
     /// Returns the size of the file in bytes.
     fn file_size(&self) -> u64;
+
     /// Read the whole file into memory, and returns a Vec<u8>.
     ///
     /// This is not recommended for large files, as it may cause performance issues.
-    fn read_bytes(&self, reader: R, size: usize) -> Result<Vec<u8>, crate::error::Error>;
+    fn read_bytes(&self, fs: &mut Self::FS, size: usize) -> Result<Vec<u8>, crate::error::Error>;
 
     /// Get the file name of the entry.
     fn file_name(&self) -> String;
+
     /// Get the file extension, if any.
     fn file_extension(&self) -> Option<String> {
         self.file_name()
@@ -47,10 +52,15 @@ pub trait FileEntryExt<R: Read + Seek> {
     }
 }
 
-pub trait VirtualFSExt {
-    /// List files, and returns a Vec of <FileEntryExt> objects.
-    fn list_files(&self) -> Vec<Box<dyn FileEntryExt<dyn ReadSeek>>>;
-    /// Get a file by name, and returns a <FileEntryExt> object.
-    /// Returns None if the file is not found.
-    fn get_file(&self, name: &str) -> Option<Box<dyn FileEntryExt<dyn ReadSeek>>>;
+pub trait VirtualFSExt<R: Read + Seek> {
+    type Entry: FileEntryExt<R, FS = Self>;
+
+    /// List files in the archive
+    fn list_files(&self) -> Vec<Self::Entry>;
+
+    /// Get a file by name
+    fn get_file(&self, name: &str) -> Option<Self::Entry>;
+
+    /// Create a SubFile reader for a given file entry
+    fn create_reader(&mut self, file: &Self::Entry) -> Result<SubFile<R>, crate::error::Error>;
 }

@@ -10,7 +10,7 @@
 use binrw::prelude::*;
 use std::io::{Read, Seek, SeekFrom};
 
-use crate::{FileEntryExt, io::SubFile};
+use crate::{FileEntryExt, VirtualFSExt, io::SubFile};
 
 /// Nintendo Switch HFS0 (Hashed File System 0) header structure
 ///
@@ -95,7 +95,32 @@ impl<R: Read + Seek> Hfs0<R> {
         Ok(data)
     }
 
-    pub fn read_to_buf(&mut self, file: &Hfs0File, buf: &mut [u8]) -> Result<(), std::io::Error> {
+    /// Read file data from the HFS0 archive into a provided buffer
+    ///
+    /// # Arguments
+    /// * `file` - The HFS0 file entry containing offset and size information
+    /// * `buf` - The pre-allocated buffer to read the file data into. Must be exactly the size of the file.
+    ///
+    /// # Returns
+    /// * `Result<(), std::io::Error>` - Ok(()) on successful read, Error if read fails
+    ///
+    /// # Errors
+    /// * `std::io::Error` - If seeking or reading from the underlying reader fails
+    ///
+    /// # Implementation Details
+    /// - Performs a single read operation for the entire file
+    /// - Uses absolute offset positioning from the start of the archive
+    /// - Expects the provided buffer to be exactly the size of the file
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use std::io::Cursor;
+    /// # let mut hfs0 = Hfs0::new(Cursor::new(vec![0u8; 1024])).unwrap();
+    /// # let file = hfs0.files.first().unwrap();
+    /// let mut buffer = vec![0u8; file.size as usize];
+    /// hfs0.read_buf(file, &mut buffer)?;
+    /// ```
+    pub fn read_buf(&mut self, file: &Hfs0File, buf: &mut [u8]) -> Result<(), std::io::Error> {
         self.reader.seek(SeekFrom::Start(file.offset))?;
         self.reader.read_exact(buf)?;
         Ok(())
@@ -160,22 +185,44 @@ impl<R: Read + Seek> Hfs0<R> {
     }
 }
 
-impl<R: Read + Seek> FileEntryExt<R> for Hfs0File {
-    fn file_reader(&self, reader: R) -> Result<SubFile<R>, crate::error::Error> {
-        Ok(SubFile::new(reader, self.offset, self.offset + self.size))
+impl<R: Read + Seek + Clone> VirtualFSExt<R> for Hfs0<R> {
+    type Entry = Hfs0File;
+
+    fn list_files(&self) -> Vec<Self::Entry> {
+        self.get_files()
+    }
+
+    fn get_file(&self, name: &str) -> Option<Self::Entry> {
+        self.get_file(name)
+    }
+
+    fn create_reader(&mut self, file: &Self::Entry) -> Result<SubFile<R>, crate::error::Error> {
+        Ok(SubFile::new(
+            self.reader.clone(),
+            file.offset,
+            file.offset + file.size,
+        ))
+    }
+}
+
+impl<R: Read + Seek + Clone> FileEntryExt<R> for Hfs0File {
+    type FS = Hfs0<R>;
+
+    fn file_reader(&self, fs: &mut Self::FS) -> Result<SubFile<R>, crate::error::Error> {
+        fs.create_reader(self)
     }
 
     fn file_size(&self) -> u64 {
         self.size
     }
 
-    fn read_bytes(&self, reader: R, size: usize) -> Result<Vec<u8>, crate::error::Error> {
+    fn read_bytes(&self, fs: &mut Self::FS, size: usize) -> Result<Vec<u8>, crate::error::Error> {
         let mut buf = vec![0; size];
-        let mut reader = reader;
-        reader.seek(SeekFrom::Start(self.offset))?;
+        let mut reader = self.file_reader(fs)?;
         reader.read_exact(&mut buf)?;
         Ok(buf)
     }
+
     fn file_name(&self) -> String {
         self.name.clone()
     }

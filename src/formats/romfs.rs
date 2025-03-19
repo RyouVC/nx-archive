@@ -5,8 +5,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use crate::io::SubFile;
-use crate::FileEntryExt;
-
+use crate::{FileEntryExt, VirtualFSExt};
 
 /// Custom error type for RomFS operations
 #[derive(Debug, thiserror::Error)]
@@ -565,16 +564,50 @@ impl<R: Read + Seek + Clone> Clone for RomFs<R> {
     }
 }
 
+impl<R: Read + Seek + Clone> VirtualFSExt<R> for RomFs<R> {
+    type Entry = FileEntry;
 
-impl<R: Read + Seek> FileEntryExt<R> for FileEntry {
-    fn read_bytes(&self, mut reader: R, size: usize) -> Result<Vec<u8>, crate::error::Error> {
+    fn list_files(&self) -> Vec<Self::Entry> {
+        let mut files = Vec::new();
+        // We need to mutably borrow self, so we clone it
+        let mut romfs = self.clone();
+
+        for offset in 0..self.file_hash_table.len() {
+            if let Ok(file) = romfs.read_file_entry(offset as u32) {
+                files.push(file);
+            }
+        }
+        files
+    }
+
+    fn get_file(&self, name: &str) -> Option<Self::Entry> {
+        // We need to mutably borrow self, so we clone it
+        let mut romfs = self.clone();
+        romfs.find_file(name).ok()
+    }
+
+    fn create_reader(&mut self, file: &Self::Entry) -> Result<SubFile<R>, crate::error::Error> {
+        let offset = self.header.file_data_offset + file.data_offset;
+        Ok(SubFile::new(
+            self.reader.clone(),
+            offset,
+            offset + file.data_size,
+        ))
+    }
+}
+
+impl<R: Read + Seek + Clone> FileEntryExt<R> for FileEntry {
+    type FS = RomFs<R>;
+
+    fn file_reader(&self, fs: &mut Self::FS) -> Result<SubFile<R>, crate::error::Error> {
+        fs.create_reader(self)
+    }
+
+    fn read_bytes(&self, fs: &mut Self::FS, size: usize) -> Result<Vec<u8>, crate::error::Error> {
         let mut buf = vec![0; size];
-        reader.seek(SeekFrom::Start(self.data_offset))?;
+        let mut reader = self.file_reader(fs)?;
         reader.read_exact(&mut buf)?;
         Ok(buf)
-    }
-    fn file_reader(&self, reader: R) -> Result<SubFile<R>, crate::error::Error> {
-        Ok(SubFile::new(reader, self.data_offset, self.data_offset + self.data_size))
     }
 
     fn file_size(&self) -> u64 {

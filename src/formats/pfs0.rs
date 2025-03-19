@@ -15,7 +15,7 @@ use std::io::{Read, Seek, SeekFrom};
 
 use binrw::prelude::*;
 
-use crate::{TitleDataExt, io::SubFile};
+use crate::{FileEntryExt, TitleDataExt, VirtualFSExt, io::SubFile};
 
 // Type alias for NSP (Nintendo Submission Package), which are simply just
 // PFS0 images
@@ -107,8 +107,10 @@ impl Pfs0Entry {
 pub struct Pfs0File {
     /// Filename extracted from the string table
     pub name: String,
-    /// File entry metadata including size and offset information
-    pub entry: Pfs0Entry,
+    /// File data offset relative to the start of file data section
+    pub data_offset: u64,
+    /// Size of the file data in bytes
+    pub size: u64,
 }
 
 /// Main structure for working with Nintendo Switch PFS0 archives
@@ -158,7 +160,11 @@ impl<R: Read + Seek> Pfs0<R> {
         let mut files = Vec::with_capacity(entries.len());
         for entry in entries.into_iter() {
             let name = entry.get_name(&string_table).unwrap();
-            files.push(Pfs0File { name, entry });
+            files.push(Pfs0File {
+                name,
+                data_offset: entry.data_offset,
+                size: entry.data_size,
+            });
         }
 
         Ok(Self {
@@ -175,41 +181,52 @@ impl<R: Read + Seek> Pfs0<R> {
     ///
     /// # Returns
     /// * `Result<Vec<u8>, crate::error::Error>` - The file contents or an error
-    ///
-    /// # Notes
-    /// - Files are extracted in chunks to avoid excessive memory usage
-    /// - The file offset calculation accounts for the PFS0 header, entries, and string table
     pub fn read_file(&mut self, vpath: &str) -> Result<Vec<u8>, crate::error::Error> {
-        let file =
-            self.files
-                .iter()
-                .find(|f| f.name == vpath)
-                .ok_or(crate::error::Error::NotFound(format!(
-                    "File not found: {}",
-                    vpath
-                )))?;
-        let file_data_offset = file.entry.data_offset;
-        let size = file.entry.data_size as usize;
+        let file = self
+            .get_file(vpath)
+            .ok_or_else(|| crate::error::Error::NotFound(format!("File not found: {}", vpath)))?;
+        let mut data = vec![0; file.size as usize];
+        self.read_buf(&file, &mut data)?;
+        Ok(data)
+    }
 
+    /// Read file data from the PFS0 archive into a provided buffer
+    ///
+    /// # Arguments
+    /// * `file` - The PFS0 file entry containing offset and size information
+    /// * `buf` - The pre-allocated buffer to read the file data into. Must be large enough to hold the entire file.
+    ///
+    /// # Returns
+    /// * `Result<(), crate::error::Error>` - Ok(()) on successful read, Error if read fails
+    ///
+    /// # Errors
+    /// * `std::io::Error` - If reading from the underlying reader fails
+    ///
+    /// # Implementation Details
+    /// - Reads file data in 8MB chunks to avoid excessive memory usage
+    /// - File offset calculation accounts for:
+    ///   - PFS0 header (0x10 bytes)
+    ///   - File entries (0x18 bytes each)
+    ///   - String table size
+    pub fn read_buf(&mut self, file: &Pfs0File, buf: &mut [u8]) -> Result<(), crate::error::Error> {
         // Calculate actual file offset in the container
         // This is: header (0x10) + all entries (0x18 * num_files) + string table size
         let files_start_offset =
             0x10 + (0x18 * self.header.num_files as u64) + (self.header.str_table_offset as u64);
-        let offset = files_start_offset + file_data_offset;
+        let offset = files_start_offset + file.data_offset;
 
         tracing::trace!(
-            ?vpath,
             offset = format!("{:012X}", offset),
-            actual_offset = format!("{:012X}", offset + size as u64),
+            actual_offset = format!("{:012X}", offset + file.size),
             "Dumping included file"
         );
 
         self.reader.seek(SeekFrom::Start(offset))?;
 
         // Read the file data in chunks to avoid excessive memory usage
-        let mut data = Vec::with_capacity(size);
         let mut ofs = 0;
         let chunk_size = 0x800000; // 8MB chunks
+        let size = file.size as usize;
 
         while ofs < size {
             let sz = if size - ofs < chunk_size {
@@ -218,48 +235,50 @@ impl<R: Read + Seek> Pfs0<R> {
                 chunk_size
             };
 
-            let mut buffer = vec![0u8; sz];
-            self.reader.read_exact(&mut buffer)?;
-            data.extend_from_slice(&buffer);
+            self.reader.read_exact(&mut buf[ofs..ofs + sz])?;
             ofs += sz;
         }
-
-        println!("Dumped!");
-        Ok(data)
+        Ok(())
     }
 
-    pub fn return_reader_file(&mut self, vpath: &str) -> Result<SubFile<R>, crate::error::Error>
+    /// Get a file entry by its path/name
+    ///
+    /// # Arguments
+    /// * `path` - The filename to find
+    ///
+    /// # Returns
+    /// * `Option<Pfs0File>` - The file entry if found, None otherwise
+    pub fn get_file(&self, path: &str) -> Option<Pfs0File> {
+        self.files
+            .iter()
+            .find(|f| f.name == path)
+            .map(|f| Pfs0File {
+                name: f.name.clone(),
+                data_offset: f.data_offset,
+                size: f.size,
+            })
+    }
+
+    /// Get all files in the archive
+    pub fn get_files(&self) -> Vec<Pfs0File> {
+        self.files
+            .iter()
+            .map(|f| Pfs0File {
+                name: f.name.clone(),
+                data_offset: f.data_offset,
+                size: f.size,
+            })
+            .collect()
+    }
+
+    pub fn subfile(&mut self, file: &Pfs0File) -> SubFile<R>
     where
         R: Clone,
     {
-        let file =
-            self.files
-                .iter()
-                .find(|f| f.name == vpath)
-                .ok_or(crate::error::Error::NotFound(format!(
-                    "File not found: {}",
-                    vpath
-                )))?;
-        let file_data_offset = file.entry.data_offset;
-        let size = file.entry.data_size;
-
-        // Calculate actual file offset in the container
-        // This is: header (0x10) + all entries (0x18 * num_files) + string table size
         let files_start_offset =
             0x10 + (0x18 * self.header.num_files as u64) + (self.header.str_table_offset as u64);
-        let offset = files_start_offset + file_data_offset;
-
-        tracing::trace!(
-            ?vpath,
-            offset = format!("{:012X}", offset),
-            actual_offset = format!("{:012X}", offset + size as u64),
-            "Dumping included file"
-        );
-
-        // Clone the reader to provide an owned value to SubFile::new
-        let reader_clone = self.reader.clone();
-
-        Ok(SubFile::new(reader_clone, offset, offset + size))
+        let offset = files_start_offset + file.data_offset;
+        SubFile::new(self.reader.clone(), offset, offset + file.size)
     }
 
     pub fn list_files(&self) -> Result<Vec<String>, crate::error::Error> {
@@ -323,6 +342,52 @@ impl<R: Read + Seek> TitleDataExt for Pfs0<R> {
             .map_err(|e| crate::error::Error::NotFound(e.to_string()))?;
 
         Ok(title_id)
+    }
+}
+
+impl<R: Read + Seek + Clone> VirtualFSExt<R> for Pfs0<R> {
+    type Entry = Pfs0File;
+
+    fn list_files(&self) -> Vec<Self::Entry> {
+        self.get_files()
+    }
+
+    fn get_file(&self, name: &str) -> Option<Self::Entry> {
+        self.get_file(name)
+    }
+
+    fn create_reader(&mut self, file: &Self::Entry) -> Result<SubFile<R>, crate::error::Error> {
+        let files_start_offset =
+            0x10 + (0x18 * self.header.num_files as u64) + (self.header.str_table_offset as u64);
+        let offset = files_start_offset + file.data_offset;
+        Ok(SubFile::new(
+            self.reader.clone(),
+            offset,
+            offset + file.size,
+        ))
+    }
+}
+
+impl<R: Read + Seek + Clone> FileEntryExt<R> for Pfs0File {
+    type FS = Pfs0<R>;
+
+    fn file_reader(&self, fs: &mut Self::FS) -> Result<SubFile<R>, crate::error::Error> {
+        fs.create_reader(self)
+    }
+
+    fn file_size(&self) -> u64 {
+        self.size
+    }
+
+    fn read_bytes(&self, fs: &mut Self::FS, size: usize) -> Result<Vec<u8>, crate::error::Error> {
+        let mut buf = vec![0; size];
+        let mut reader = self.file_reader(fs)?;
+        reader.read_exact(&mut buf)?;
+        Ok(buf)
+    }
+
+    fn file_name(&self) -> String {
+        self.name.clone()
     }
 }
 
