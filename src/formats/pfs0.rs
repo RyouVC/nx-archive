@@ -138,7 +138,7 @@ impl<R: Read + Seek> Pfs0<R> {
     pub fn from_reader(mut reader: R) -> Result<Self, crate::error::Error> {
         let header: Pfs0Header = reader.read_le()?;
         // Magic validation is handled by binrw via the magic attribute
-        println!("PFS0 Header: {:?}", header);
+        // println!("PFS0 Header: {:?}", header);
 
         // Read all file entries
         let entries = (0..header.num_files)
